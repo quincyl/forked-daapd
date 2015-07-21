@@ -149,7 +149,7 @@ elif test x$libxxresample = xlibavresample; then
 	AC_DEFINE(HAVE_LIBAVRESAMPLE, 1, [Define to 1 if you have libav's libavresample])
 fi
 
-PKG_CHECK_MODULES(LIBAV, [ libavformat libavcodec libswscale libavutil $libxxresample ])
+PKG_CHECK_MODULES(LIBAV, [ libavformat libavcodec libswscale libavutil libavfilter $libxxresample ])
 
 save_LIBS="$LIBS"
 AC_CHECK_LIB([avcodec], [avcodec_find_best_pix_fmt_of_list],
