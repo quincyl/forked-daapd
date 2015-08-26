@@ -1403,7 +1403,7 @@ source_open(struct player_source *ps, int no_md)
 	free(mfi->path);
 	mfi->path = url;
 
-	ret = transcode_setup(&ps->ctx, mfi, NULL, 0);
+	ret = transcode_setup(&ps->ctx, XCODE_PCM16_NOHEADER, mfi, NULL);
 	break;
 
       case DATA_KIND_SPOTIFY:
@@ -1422,7 +1422,7 @@ source_open(struct player_source *ps, int no_md)
 
       default:
 	ps->type = SOURCE_FILE;
-	ret = transcode_setup(&ps->ctx, mfi, NULL, 0);
+	ret = transcode_setup(&ps->ctx, XCODE_PCM16_NOHEADER, mfi, NULL);
     }
 
   free_mfi(mfi, 0);

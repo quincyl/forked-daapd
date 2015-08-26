@@ -9,6 +9,18 @@
 #endif
 #include "http.h"
 
+enum transcode_profile
+{
+  // Transcodes the best available audio stream into PCM16 (does not add wav header)
+  XCODE_PCM16_NOHEADER,
+  // Transcodes the best available audio stream into PCM16 (with wav header)
+  XCODE_PCM16_HEADER,
+  // Transcodes the best available audio stream into MPEG3
+  XCODE_MPEG3,
+  // Transcodes video + audio + subtitle streams (not tested - for future use)
+  XCODE_VIDEO,
+};
+
 struct transcode_ctx;
 
 int
@@ -18,7 +30,7 @@ int
 transcode_seek(struct transcode_ctx *ctx, int ms);
 
 int
-transcode_setup(struct transcode_ctx **nctx, struct media_file_info *mfi, off_t *est_size, int wavhdr);
+transcode_setup(struct transcode_ctx **nctx, enum transcode_profile profile, struct media_file_info *mfi, off_t *est_size);
 
 void
 transcode_cleanup(struct transcode_ctx *ctx);
