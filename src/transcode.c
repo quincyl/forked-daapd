@@ -523,7 +523,7 @@ init_filters(struct transcode_ctx *ctx)
 	continue;
 
       dec_ctx = ctx->ifmt_ctx->streams[i]->codec;
-      enc_ctx = ctx->ifmt_ctx->streams[stream_nb]->codec;
+      enc_ctx = ctx->ofmt_ctx->streams[stream_nb]->codec;
 
       if (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO)
 	filter_spec = "null"; /* passthrough (dummy) filter for video */
