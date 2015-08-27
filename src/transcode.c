@@ -44,7 +44,14 @@
 #include "avio_evbuffer.h"
 #include "transcode.h"
 
+// Interval between ICY metadata checks for streams, in seconds
+#define METADATA_ICY_INTERVAL 5
+// Maximum number of streams in a file that we will accept
 #define MAX_STREAMS 64
+
+static char *default_codecs = "mpeg,wav";
+static char *roku_codecs = "mpeg,mp4a,wma,wav";
+static char *itunes_codecs = "mpeg,mp4a,mp4v,alac,wav";
 
 struct filter_ctx {
   AVFilterContext *buffersink_ctx;
@@ -83,13 +90,15 @@ struct transcode_ctx {
   int out_video_height;
   int out_video_width;
 
-// TODO
+  // TODO
   int need_resample;
 
   off_t offset;
   uint32_t duration;
   uint64_t samples;
+
   uint32_t icy_hash;
+  uint32_t icy_interval;
 
   /* WAV header */
   int wavhdr;
@@ -428,7 +437,7 @@ close_output(struct transcode_ctx *ctx)
 }
 
 static int
-init_filter(struct filter_ctx *filter_ctx, AVCodecContext *dec_ctx, AVCodecContext *enc_ctx, const char *filter_spec)
+open_filter(struct filter_ctx *filter_ctx, AVCodecContext *dec_ctx, AVCodecContext *enc_ctx, const char *filter_spec)
 {
   AVFilter *buffersrc = NULL;
   AVFilter *buffersink = NULL;
@@ -590,7 +599,7 @@ init_filter(struct filter_ctx *filter_ctx, AVCodecContext *dec_ctx, AVCodecConte
 }
 
 static int
-init_filters(struct transcode_ctx *ctx)
+open_filters(struct transcode_ctx *ctx)
 {
   AVCodecContext *dec_ctx, *enc_ctx;
   const char *filter_spec;
@@ -625,7 +634,7 @@ init_filters(struct transcode_ctx *ctx)
       else
 	continue;
 
-      ret = init_filter(&ctx->filter_ctx[i], dec_ctx, enc_ctx, filter_spec);
+      ret = open_filter(&ctx->filter_ctx[i], dec_ctx, enc_ctx, filter_spec);
       if (ret < 0)
 	goto out_fail;
     }
@@ -758,8 +767,8 @@ flush_encoder(struct transcode_ctx *ctx, unsigned int stream_index)
   while ((ret == 0) && got_frame);
 }
 
-int
-transcode_setup(struct transcode_ctx **nctx, enum transcode_profile profile, struct media_file_info *mfi, off_t *est_size)
+struct transcode_ctx *
+transcode_setup(enum transcode_profile profile, struct media_file_info *mfi, off_t *est_size)
 {
   struct transcode_ctx *ctx;
 
@@ -777,11 +786,12 @@ transcode_setup(struct transcode_ctx **nctx, enum transcode_profile profile, str
     goto out_fail_input;
   if (open_output(ctx) < 0)
     goto out_fail_output;
-  if (init_filters(ctx) < 0)
+  if (open_filters(ctx) < 0)
     goto out_fail_filter;
 
   ctx->duration = mfi->song_length;
   ctx->samples = mfi->sample_count;
+  ctx->icy_interval = METADATA_ICY_INTERVAL * ctx->out_channels * ctx->out_byte_depth * ctx->out_sample_rate;
 
   if (profile == XCODE_PCM16_HEADER)
     {
@@ -789,9 +799,7 @@ transcode_setup(struct transcode_ctx **nctx, enum transcode_profile profile, str
       make_wav_header(ctx, est_size);
     }
 
-  *nctx = ctx;
-
-  return 0;
+  return ctx;
 
  out_fail_filter:
   close_output(ctx);
@@ -801,9 +809,8 @@ transcode_setup(struct transcode_ctx **nctx, enum transcode_profile profile, str
  out_fail_profile:
   free(ctx);
  out_fail_ctx:
-  *nctx = NULL;
 
-  return -1;
+  return NULL;
 }
 
 int
@@ -893,6 +900,9 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
       evbuffer_add_buffer(evbuf, ctx->obuf);
     }
 
+  ctx->offset += processed;
+  *icy_timer = (ctx->offset % ctx->icy_interval < processed);
+
   av_free_packet(&packet);
   av_frame_free(&frame);
 
@@ -940,22 +950,121 @@ return -1;
 int
 transcode_needed(const char *user_agent, const char *client_codecs, char *file_codectype)
 {
-return 0;
+  char *codectype;
+  cfg_t *lib;
+  int size;
+  int i;
+
+  if (!file_codectype)
+    {
+      DPRINTF(E_LOG, L_XCODE, "Can't determine transcode status, codec type is unknown\n");
+      return -1;
+    }
+
+  lib = cfg_getsec(cfg, "library");
+
+  size = cfg_size(lib, "no_transcode");
+  if (size > 0)
+    {
+      for (i = 0; i < size; i++)
+	{
+	  codectype = cfg_getnstr(lib, "no_transcode", i);
+
+	  if (strcmp(file_codectype, codectype) == 0)
+	    return 0; // Codectype is in no_transcode
+	}
+    }
+
+  size = cfg_size(lib, "force_transcode");
+  if (size > 0)
+    {
+      for (i = 0; i < size; i++)
+	{
+	  codectype = cfg_getnstr(lib, "force_transcode", i);
+
+	  if (strcmp(file_codectype, codectype) == 0)
+	    return 1; // Codectype is in force_transcode
+	}
+    }
+
+  if (!client_codecs)
+    {
+      if (user_agent)
+	{
+	  if (strncmp(user_agent, "iTunes", strlen("iTunes")) == 0)
+	    client_codecs = itunes_codecs;
+	  else if (strncmp(user_agent, "QuickTime", strlen("QuickTime")) == 0)
+	    client_codecs = itunes_codecs; // Use iTunes codecs
+	  else if (strncmp(user_agent, "Front%20Row", strlen("Front%20Row")) == 0)
+	    client_codecs = itunes_codecs; // Use iTunes codecs
+	  else if (strncmp(user_agent, "AppleCoreMedia", strlen("AppleCoreMedia")) == 0)
+	    client_codecs = itunes_codecs; // Use iTunes codecs
+	  else if (strncmp(user_agent, "Roku", strlen("Roku")) == 0)
+	    client_codecs = roku_codecs;
+	  else if (strncmp(user_agent, "Hifidelio", strlen("Hifidelio")) == 0)
+	    /* Allegedly can't transcode for Hifidelio because their
+	     * HTTP implementation doesn't honour Connection: close.
+	     * At least, that's why mt-daapd didn't do it.
+	     */
+	    return 0;
+	}
+    }
+  else
+    DPRINTF(E_DBG, L_XCODE, "Client advertises codecs: %s\n", client_codecs);
+
+  if (!client_codecs)
+    {
+      DPRINTF(E_DBG, L_XCODE, "Could not identify client, using default codectype set\n");
+      client_codecs = default_codecs;
+    }
+
+  if (strstr(client_codecs, file_codectype))
+    {
+      DPRINTF(E_DBG, L_XCODE, "Codectype supported by client, no transcoding needed\n");
+      return 0;
+    }
+
+  DPRINTF(E_DBG, L_XCODE, "Will transcode\n");
+  return 1;
 }
 
-int
-transcode_wav2mpeg(uint8_t *wavbuf, int wavbufsize, uint8_t *mpegbuf, int mpegbufsize)
+struct http_icy_metadata *
+transcode_metadata(struct transcode_ctx *ctx, int *changed)
 {
-return -1;
+  struct http_icy_metadata *m;
+
+  if (!ctx->ifmt_ctx)
+    return NULL;
+
+  m = http_icy_metadata_get(ctx->ifmt_ctx, 1);
+  if (!m)
+    return NULL;
+
+  *changed = (m->hash != ctx->icy_hash);
+
+  ctx->icy_hash = m->hash;
+
+  return m;
 }
 
-void
-transcode_metadata(struct transcode_ctx *ctx, struct http_icy_metadata **metadata, int *changed)
+char *
+transcode_metadata_artwork_url(struct transcode_ctx *ctx)
 {
-}
+  struct http_icy_metadata *m;
+  char *artwork_url;
 
-void
-transcode_metadata_artwork_url(struct transcode_ctx *ctx, char **artwork_url)
-{
+  if (!ctx->ifmt_ctx || !ctx->ifmt_ctx->filename)
+    return NULL;
+
+  artwork_url = NULL;
+
+  m = http_icy_metadata_get(ctx->ifmt_ctx, 1);
+  if (m && m->artwork_url)
+    artwork_url = strdup(m->artwork_url);
+
+  if (m)
+    http_icy_metadata_free(m, 0);
+
+  return artwork_url;
 }
 

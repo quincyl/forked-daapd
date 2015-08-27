@@ -736,7 +736,7 @@ metadata_check_icy(void)
   struct http_icy_metadata *metadata;
   int changed;
 
-  transcode_metadata(cur_streaming->ctx, &metadata, &changed);
+  metadata = transcode_metadata(cur_streaming->xcode, &changed);
   if (!metadata)
     return;
 
@@ -1177,8 +1177,8 @@ source_free(struct player_source *ps)
     {
       case SOURCE_FILE:
       case SOURCE_HTTP:
-	if (ps->ctx)
-	  transcode_cleanup(ps->ctx);
+	if (ps->xcode)
+	  transcode_cleanup(ps->xcode);
 	break;
 
       case SOURCE_SPOTIFY:
@@ -1206,10 +1206,10 @@ source_stop(struct player_source *ps)
 	{
 	  case SOURCE_FILE:
 	  case SOURCE_HTTP:
-	    if (ps->ctx)
+	    if (ps->xcode)
 	      {
-		transcode_cleanup(ps->ctx);
-		ps->ctx = NULL;
+		transcode_cleanup(ps->xcode);
+		ps->xcode = NULL;
 	      }
 	    break;
 
@@ -1403,7 +1403,8 @@ source_open(struct player_source *ps, int no_md)
 	free(mfi->path);
 	mfi->path = url;
 
-	ret = transcode_setup(&ps->ctx, XCODE_PCM16_NOHEADER, mfi, NULL);
+	ps->xcode = transcode_setup(XCODE_PCM16_NOHEADER, mfi, NULL);
+	ret = ps->xcode ? 0 : -1;
 	break;
 
       case DATA_KIND_SPOTIFY:
@@ -1422,7 +1423,8 @@ source_open(struct player_source *ps, int no_md)
 
       default:
 	ps->type = SOURCE_FILE;
-	ret = transcode_setup(&ps->ctx, XCODE_PCM16_NOHEADER, mfi, NULL);
+	ps->xcode = transcode_setup(XCODE_PCM16_NOHEADER, mfi, NULL);
+	ret = ps->xcode ? 0 : -1;
     }
 
   free_mfi(mfi, 0);
@@ -1479,9 +1481,9 @@ source_next(int force)
 	if (!cur_streaming)
 	  break;
 
-	if ((cur_streaming->type == SOURCE_FILE) && cur_streaming->ctx)
+	if ((cur_streaming->type == SOURCE_FILE) && cur_streaming->xcode)
 	  {
-	    ret = transcode_seek(cur_streaming->ctx, 0);
+	    ret = transcode_seek(cur_streaming->xcode, 0);
 
 	    /* source_open() takes care of sending metadata, but we don't
 	     * call it when repeating a song as we just seek back to 0
@@ -1741,10 +1743,10 @@ source_check(void)
 
 	  if (ps->setup_done)
 	    {
-	      if ((ps->type == SOURCE_FILE) && ps->ctx)
+	      if ((ps->type == SOURCE_FILE) && ps->xcode)
 		{
-	          transcode_cleanup(ps->ctx);
-	          ps->ctx = NULL;
+	          transcode_cleanup(ps->xcode);
+	          ps->xcode = NULL;
 		}
 	      ps->play_next = NULL;
 	    }
@@ -1796,10 +1798,10 @@ source_check(void)
 
       if (ps->setup_done)
 	{
-	  if ((ps->type == SOURCE_FILE) && ps->ctx)
+	  if ((ps->type == SOURCE_FILE) && ps->xcode)
 	    {
-	      transcode_cleanup(ps->ctx);
-	      ps->ctx = NULL;
+	      transcode_cleanup(ps->xcode);
+	      ps->xcode = NULL;
 	    }
 	  ps->play_next = NULL;
 	}
@@ -1885,14 +1887,14 @@ source_read(uint8_t *buf, int len, uint64_t rtptime)
 	  switch (cur_streaming->type)
 	    {
 	      case SOURCE_HTTP:
-		ret = transcode(cur_streaming->ctx, audio_buf, len - nbytes, &icy_timer);
+		ret = transcode(cur_streaming->xcode, audio_buf, len - nbytes, &icy_timer);
 
 		if (icy_timer)
 		  metadata_check_icy();
 		break;
 
 	      case SOURCE_FILE:
-		ret = transcode(cur_streaming->ctx, audio_buf, len - nbytes, &icy_timer);
+		ret = transcode(cur_streaming->xcode, audio_buf, len - nbytes, &icy_timer);
 		break;
 
 #ifdef HAVE_SPOTIFY_H
@@ -2647,10 +2649,10 @@ artwork_url_get(struct player_command *cmd)
     return -1;
 
   /* Check that we are playing a viable stream, and that it has the requested id */
-  if (!ps->ctx || ps->type != SOURCE_HTTP || ps->id != cmd->arg.icy.id)
+  if (!ps->xcode || ps->type != SOURCE_HTTP || ps->id != cmd->arg.icy.id)
     return -1;
 
-  transcode_metadata_artwork_url(ps->ctx, &cmd->arg.icy.artwork_url);
+  cmd->arg.icy.artwork_url = transcode_metadata_artwork_url(ps->xcode);
 
   return 0;
 }
@@ -3106,7 +3108,7 @@ playback_seek_bh(struct player_command *cmd)
   switch (ps->type)
     {
       case SOURCE_FILE:
-	ret = transcode_seek(ps->ctx, ms);
+	ret = transcode_seek(ps->xcode, ms);
 	break;
 #ifdef HAVE_SPOTIFY_H
       case SOURCE_SPOTIFY:
@@ -3165,7 +3167,7 @@ playback_pause_bh(struct player_command *cmd)
   switch (ps->type)
     {
       case SOURCE_FILE:
-	ret = transcode_seek(ps->ctx, ms);
+	ret = transcode_seek(ps->xcode, ms);
 	break;
 #ifdef HAVE_SPOTIFY_H
       case SOURCE_SPOTIFY:

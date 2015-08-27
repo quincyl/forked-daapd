@@ -29,8 +29,8 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
 int
 transcode_seek(struct transcode_ctx *ctx, int ms);
 
-int
-transcode_setup(struct transcode_ctx **nctx, enum transcode_profile profile, struct media_file_info *mfi, off_t *est_size);
+struct transcode_ctx *
+transcode_setup(enum transcode_profile profile, struct media_file_info *mfi, off_t *est_size);
 
 void
 transcode_cleanup(struct transcode_ctx *ctx);
@@ -38,10 +38,10 @@ transcode_cleanup(struct transcode_ctx *ctx);
 int
 transcode_needed(const char *user_agent, const char *client_codecs, char *file_codectype);
 
-void
-transcode_metadata(struct transcode_ctx *ctx, struct http_icy_metadata **metadata, int *changed);
+struct http_icy_metadata *
+transcode_metadata(struct transcode_ctx *ctx, int *changed);
 
-void
-transcode_metadata_artwork_url(struct transcode_ctx *ctx, char **artwork_url);
+char *
+transcode_metadata_artwork_url(struct transcode_ctx *ctx);
 
 #endif /* !__TRANSCODE_H__ */

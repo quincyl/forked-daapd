@@ -91,7 +91,7 @@ struct player_source
   uint64_t output_start;
   uint64_t end;
 
-  struct transcode_ctx *ctx;
+  struct transcode_ctx *xcode;
 
   struct player_source *pl_next;
   struct player_source *pl_prev;
