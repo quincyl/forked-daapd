@@ -63,6 +63,11 @@ struct transcode_ctx {
   AVFormatContext *ifmt_ctx;
   AVFormatContext *ofmt_ctx;
 
+  // TODO maybe use these
+  AVStream *audio_stream;
+  AVStream *video_stream;
+  AVStream *subtitle_stream;
+
   struct filter_ctx *filter_ctx;
 
   // The ffmpeg muxer writes to this buffer using the avio_evbuffer interface
@@ -72,6 +77,12 @@ struct transcode_ctx {
   // numbers that we encode. So if we are decoding audio stream 3 and encoding it
   // to 0, then stream_map[3] is 0. A value of -1 means the stream is ignored.
   int stream_map[MAX_STREAMS];
+
+  // Used for seeking
+  int resume;
+  AVPacket seek_packet;
+  int64_t prev_pts[MAX_STREAMS];
+  int64_t offset_pts[MAX_STREAMS];
 
   // Options for encoding and muxing
   const char *out_format;
@@ -234,6 +245,7 @@ open_input(struct transcode_ctx *ctx, const char *path)
 
   // Mark for transcoding - actual output stream will be set by open_output()
   ctx->stream_map[stream_index] = 1;
+  ctx->audio_stream = ctx->ifmt_ctx->streams[stream_index];
 
   // If no video then we are all done
   if (!ctx->transcode_video)
@@ -261,11 +273,15 @@ open_input(struct transcode_ctx *ctx, const char *path)
 
   // Mark for transcoding - actual output stream will be set by open_output()
   ctx->stream_map[stream_index] = 1;
+  ctx->video_stream = ctx->ifmt_ctx->streams[stream_index];
 
   // Find a (random) subtitle stream which will be remuxed
   stream_index = av_find_best_stream(ctx->ifmt_ctx, AVMEDIA_TYPE_SUBTITLE, -1, -1, NULL, 0);
   if (stream_index >= 0)
-    ctx->stream_map[stream_index] = 1;
+    {
+      ctx->stream_map[stream_index] = 1;
+      ctx->subtitle_stream = ctx->ifmt_ctx->streams[stream_index];
+    }
 
   return 0;
 
@@ -696,6 +712,19 @@ encode_write_frame(struct transcode_ctx *ctx, AVFrame *filt_frame, unsigned int 
 
   // Prepare packet for muxing
   enc_pkt.stream_index = stream_nb;
+
+  // This "wonderful" peace of code makes sure that the timestamp never decreases,
+  // even if the user seeked backwards. The muxer will not accept decreasing
+  // timestamps
+  enc_pkt.pts += ctx->offset_pts[stream_nb];
+  if (enc_pkt.pts < ctx->prev_pts[stream_nb])
+    {
+      ctx->offset_pts[stream_nb] += ctx->prev_pts[stream_nb] - enc_pkt.pts;
+      enc_pkt.pts = ctx->prev_pts[stream_nb];
+    }
+  ctx->prev_pts[stream_nb] = enc_pkt.pts;
+  enc_pkt.dts = enc_pkt.pts; //FIXME
+
   av_packet_rescale_ts(&enc_pkt, out_stream->codec->time_base, out_stream->time_base);
 
   // Mux encoded frame
@@ -752,12 +781,17 @@ filter_encode_write_frame(struct transcode_ctx *ctx, AVFrame *frame, unsigned in
 static void
 flush_encoder(struct transcode_ctx *ctx, unsigned int stream_index)
 {
+  int stream_nb;
   int ret;
   int got_frame;
 
-  DPRINTF(E_DBG, L_XCODE, "Flushing stream #%u encoder\n", stream_index);
+  stream_nb = ctx->stream_map[stream_index];
+  if (stream_nb < 0)
+    return;
 
-  if (!(ctx->ofmt_ctx->streams[stream_index]->codec->codec->capabilities & CODEC_CAP_DELAY))
+  DPRINTF(E_DBG, L_XCODE, "Flushing output stream #%u encoder\n", stream_nb);
+
+  if (!(ctx->ofmt_ctx->streams[stream_nb]->codec->codec->capabilities & CODEC_CAP_DELAY))
     return;
 
   do
@@ -821,7 +855,6 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
   AVFrame *frame = NULL;
   int stream_nb;
   int processed;
-  int stop;
   int got_frame;
   int (*dec_func)(AVCodecContext *, AVFrame *, int *, const AVPacket *);
   int ret;
@@ -835,10 +868,14 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
 
   ret = 0;
   processed = 0;
-  stop = 0;
-  while ((processed < wanted) && !stop)
+  while (processed < wanted)
     {
-      if ((ret = av_read_frame(ctx->ifmt_ctx, &packet)) < 0)
+      if (ctx->resume)
+	{
+          av_copy_packet(&packet, &ctx->seek_packet);
+	  ctx->resume = 0;
+	}
+      else if ((ret = av_read_frame(ctx->ifmt_ctx, &packet)) < 0)
 	break;
 
       stream_nb = ctx->stream_map[packet.stream_index];
@@ -944,7 +981,88 @@ transcode_cleanup(struct transcode_ctx *ctx)
 int
 transcode_seek(struct transcode_ctx *ctx, int ms)
 {
-return -1;
+  int64_t start_time;
+  int64_t target_pts;
+  int64_t got_pts;
+  int stream_nb;
+  int got_ms;
+  int flags;
+  int ret;
+  int i;
+
+  start_time = ctx->audio_stream->start_time;
+
+  target_pts = ms;
+  target_pts = target_pts * AV_TIME_BASE / 1000;
+  target_pts = av_rescale_q(target_pts, AV_TIME_BASE_Q, ctx->audio_stream->time_base);
+
+  if ((start_time != AV_NOPTS_VALUE) && (start_time > 0))
+    target_pts += start_time;
+
+  ret = av_seek_frame(ctx->ifmt_ctx, ctx->audio_stream->index, target_pts, AVSEEK_FLAG_BACKWARD);
+  if (ret < 0)
+    {
+      DPRINTF(E_WARN, L_XCODE, "Could not seek into stream: %s\n", strerror(AVUNERROR(ret)));
+
+      return -1;
+    }
+
+  for (i = 0; i < ctx->ifmt_ctx->nb_streams; i++)
+    {
+      stream_nb = ctx->stream_map[i];
+      if (stream_nb < 0)
+	continue;
+
+      avcodec_flush_buffers(ctx->ifmt_ctx->streams[i]->codec);
+      avcodec_flush_buffers(ctx->ofmt_ctx->streams[stream_nb]->codec);
+    }
+
+  // Fast forward until first packet with a timestamp is found
+  ctx->audio_stream->codec->skip_frame = AVDISCARD_NONREF;
+  flags = 0;
+  while (1)
+    {
+      av_free_packet(&ctx->seek_packet);
+
+      ret = av_read_frame(ctx->ifmt_ctx, &ctx->seek_packet);
+      if (ret < 0)
+	{
+	  DPRINTF(E_WARN, L_XCODE, "Could not read more data while seeking\n");
+
+	  flags = 1;
+	  break;
+	}
+
+      if (ctx->seek_packet.stream_index != ctx->audio_stream->index)
+	continue;
+
+      // Need a pts to return the real position
+      if (ctx->seek_packet.pts == AV_NOPTS_VALUE)
+	continue;
+
+      break;
+    }
+  ctx->audio_stream->codec->skip_frame = AVDISCARD_DEFAULT;
+
+  // Error while reading frame above
+  if (flags)
+    return -1;
+
+  // Tell transcode() to resume with seek_packet
+  ctx->resume = 1;
+
+  // Compute position in ms from pts
+  got_pts = ctx->seek_packet.pts;
+
+  if ((start_time != AV_NOPTS_VALUE) && (start_time > 0))
+    got_pts -= start_time;
+
+  got_pts = av_rescale_q(got_pts, ctx->audio_stream->time_base, AV_TIME_BASE_Q);
+  got_ms = got_pts / (AV_TIME_BASE / 1000);
+
+  DPRINTF(E_DBG, L_XCODE, "Seek wanted %d ms, got %d ms\n", ms, got_ms);
+
+  return got_ms;
 }
 
 int
