@@ -31,12 +31,17 @@
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
-#include <libavfilter/avfiltergraph.h>
-#include <libavfilter/avcodec.h>
-#include <libavfilter/buffersink.h>
-#include <libavfilter/buffersrc.h>
 #include <libavutil/opt.h>
-#include <libavutil/pixdesc.h>
+
+#if LIBAVCODEC_VERSION_MAJOR >= 56 || (LIBAVCODEC_VERSION_MAJOR == 55 && LIBAVCODEC_VERSION_MINOR >= 29)
+# include <libavfilter/avcodec.h>
+# include <libavfilter/avfiltergraph.h>
+# include <libavfilter/buffersink.h>
+# include <libavfilter/buffersrc.h>
+# include <libavutil/pixdesc.h>
+#else
+# include "ffmpeg-compat.c"
+#endif
 
 #include "logger.h"
 #include "conffile.h"
@@ -53,11 +58,13 @@ static char *default_codecs = "mpeg,wav";
 static char *roku_codecs = "mpeg,mp4a,wma,wav";
 static char *itunes_codecs = "mpeg,mp4a,mp4v,alac,wav";
 
+#if LIBAVCODEC_VERSION_MAJOR >= 56 || (LIBAVCODEC_VERSION_MAJOR == 55 && LIBAVCODEC_VERSION_MINOR >= 29)
 struct filter_ctx {
   AVFilterContext *buffersink_ctx;
   AVFilterContext *buffersrc_ctx;
   AVFilterGraph *filter_graph;
 };
+#endif
 
 struct transcode_ctx {
   AVFormatContext *ifmt_ctx;
@@ -68,7 +75,9 @@ struct transcode_ctx {
   AVStream *video_stream;
   AVStream *subtitle_stream;
 
+#if LIBAVCODEC_VERSION_MAJOR >= 56 || (LIBAVCODEC_VERSION_MAJOR == 55 && LIBAVCODEC_VERSION_MINOR >= 29)
   struct filter_ctx *filter_ctx;
+#endif
 
   // The ffmpeg muxer writes to this buffer using the avio_evbuffer interface
   struct evbuffer *obuf;
@@ -235,6 +244,9 @@ open_input(struct transcode_ctx *ctx, const char *path)
       DPRINTF(E_LOG, L_XCODE, "Did not find audio stream or suitable decoder for %s\n", path);
       goto out_fail;
     }
+
+  ctx->ifmt_ctx->streams[stream_index]->codec->request_sample_fmt = ctx->out_sample_format;
+  ctx->ifmt_ctx->streams[stream_index]->codec->request_channel_layout = ctx->out_channel_layout;
 
   ret = avcodec_open2(ctx->ifmt_ctx->streams[stream_index]->codec, decoder, NULL);
   if (ret < 0)
@@ -452,6 +464,7 @@ close_output(struct transcode_ctx *ctx)
   avformat_free_context(ctx->ofmt_ctx);
 }
 
+#if LIBAVCODEC_VERSION_MAJOR >= 56 || (LIBAVCODEC_VERSION_MAJOR == 55 && LIBAVCODEC_VERSION_MINOR >= 29)
 static int
 open_filter(struct filter_ctx *filter_ctx, AVCodecContext *dec_ctx, AVCodecContext *enc_ctx, const char *filter_spec)
 {
@@ -680,6 +693,18 @@ close_filters(struct transcode_ctx *ctx)
     }
   av_free(ctx->filter_ctx);
 }
+#else
+static int
+open_filters(struct transcode_ctx *ctx)
+{
+  return 0;
+}
+static void
+close_filters(struct transcode_ctx *ctx)
+{
+  return;
+}
+#endif
 
 static int
 encode_write_frame(struct transcode_ctx *ctx, AVFrame *filt_frame, unsigned int stream_index, int *got_frame)
@@ -704,7 +729,6 @@ encode_write_frame(struct transcode_ctx *ctx, AVFrame *filt_frame, unsigned int 
   enc_pkt.size = 0;
   av_init_packet(&enc_pkt);
   ret = enc_func(out_stream->codec, &enc_pkt, filt_frame, got_frame);
-  av_frame_free(&filt_frame);
   if (ret < 0)
     return -1;
   if (!(*got_frame))
@@ -732,6 +756,7 @@ encode_write_frame(struct transcode_ctx *ctx, AVFrame *filt_frame, unsigned int 
   return ret;
 }
 
+#if LIBAVCODEC_VERSION_MAJOR >= 56 || (LIBAVCODEC_VERSION_MAJOR == 55 && LIBAVCODEC_VERSION_MINOR >= 29)
 static int
 filter_encode_write_frame(struct transcode_ctx *ctx, AVFrame *frame, unsigned int stream_index)
 {
@@ -771,12 +796,20 @@ filter_encode_write_frame(struct transcode_ctx *ctx, AVFrame *frame, unsigned in
 
       filt_frame->pict_type = AV_PICTURE_TYPE_NONE;
       ret = encode_write_frame(ctx, filt_frame, stream_index, NULL);
+      av_frame_free(&filt_frame);
       if (ret < 0)
 	break;
     }
 
   return ret;
 }
+#else
+static int
+filter_encode_write_frame(struct transcode_ctx *ctx, AVFrame *frame, unsigned int stream_index)
+{
+  return encode_write_frame(ctx, frame, stream_index, NULL);
+}
+#endif
 
 static void
 flush_encoder(struct transcode_ctx *ctx, unsigned int stream_index)
@@ -856,7 +889,6 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
   int stream_nb;
   int processed;
   int got_frame;
-  int (*dec_func)(AVCodecContext *, AVFrame *, int *, const AVPacket *);
   int ret;
 
   if (ctx->wavhdr && (ctx->offset == 0))
@@ -888,7 +920,11 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
       in_stream = ctx->ifmt_ctx->streams[packet.stream_index];
       out_stream = ctx->ofmt_ctx->streams[stream_nb];
 
+#if LIBAVCODEC_VERSION_MAJOR >= 56 || (LIBAVCODEC_VERSION_MAJOR == 55 && LIBAVCODEC_VERSION_MINOR >= 29)
       if (ctx->filter_ctx[packet.stream_index].filter_graph)
+#else
+      if (1)
+#endif
 	{
 	  frame = av_frame_alloc();
 	  if (!frame)
@@ -899,8 +935,10 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
 
 	  av_packet_rescale_ts(&packet, in_stream->time_base, in_stream->codec->time_base);
 
-	  dec_func = (in_stream->codec->codec_type == AVMEDIA_TYPE_VIDEO) ? avcodec_decode_video2 : avcodec_decode_audio4;
-	  ret = dec_func(in_stream->codec, frame, &got_frame, &packet);
+	  if (in_stream->codec->codec_type == AVMEDIA_TYPE_AUDIO)
+	    ret = avcodec_decode_audio4(in_stream->codec, frame, &got_frame, &packet);
+	  else
+	    ret = avcodec_decode_video2(in_stream->codec, frame, &got_frame, &packet);
 	  if (ret < 0)
 	    {
 	      av_frame_free(&frame);
@@ -962,9 +1000,10 @@ transcode_cleanup(struct transcode_ctx *ctx)
     {
       if (ctx->stream_map[i] < 0)
 	continue;
+#if LIBAVCODEC_VERSION_MAJOR >= 56 || (LIBAVCODEC_VERSION_MAJOR == 55 && LIBAVCODEC_VERSION_MINOR >= 29)
       if (!ctx->filter_ctx[i].filter_graph)
 	continue;
-
+#endif
       filter_encode_write_frame(ctx, NULL, i);
       flush_encoder(ctx, i);
     }
