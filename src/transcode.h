@@ -15,8 +15,8 @@ enum transcode_profile
   XCODE_PCM16_NOHEADER,
   // Transcodes the best available audio stream into PCM16 (with wav header)
   XCODE_PCM16_HEADER,
-  // Transcodes the best available audio stream into MPEG3
-  XCODE_MPEG3,
+  // Transcodes the best available audio stream into MP3
+  XCODE_MP3,
   // Transcodes video + audio + subtitle streams (not tested - for future use)
   XCODE_VIDEO,
 };

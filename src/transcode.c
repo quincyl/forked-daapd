@@ -33,7 +33,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/opt.h>
 
-#if LIBAVCODEC_VERSION_MAJOR >= 56 || (LIBAVCODEC_VERSION_MAJOR == 55 && LIBAVCODEC_VERSION_MINOR >= 29)
+#ifdef HAVE_LIBAVFILTER
 # include <libavfilter/avcodec.h>
 # include <libavfilter/avfiltergraph.h>
 # include <libavfilter/buffersink.h>
@@ -58,7 +58,7 @@ static char *default_codecs = "mpeg,wav";
 static char *roku_codecs = "mpeg,mp4a,wma,wav";
 static char *itunes_codecs = "mpeg,mp4a,mp4v,alac,wav";
 
-#if LIBAVCODEC_VERSION_MAJOR >= 56 || (LIBAVCODEC_VERSION_MAJOR == 55 && LIBAVCODEC_VERSION_MINOR >= 29)
+#ifdef HAVE_LIBAVFILTER
 struct filter_ctx {
   AVFilterContext *buffersink_ctx;
   AVFilterContext *buffersrc_ctx;
@@ -75,7 +75,7 @@ struct transcode_ctx {
   AVStream *video_stream;
   AVStream *subtitle_stream;
 
-#if LIBAVCODEC_VERSION_MAJOR >= 56 || (LIBAVCODEC_VERSION_MAJOR == 55 && LIBAVCODEC_VERSION_MINOR >= 29)
+#ifdef HAVE_LIBAVFILTER
   struct filter_ctx *filter_ctx;
 #endif
 
@@ -191,8 +191,15 @@ init_profile(struct transcode_ctx *ctx, enum transcode_profile profile)
 	ctx->out_byte_depth = 2; // Bytes per sample = 16/8
 	return 0;
 
-      case XCODE_MPEG3:
+      case XCODE_MP3:
         ctx->transcode_video = 0;
+	ctx->out_format = "mp3";
+	ctx->out_audio_codec = AV_CODEC_ID_MP3;
+	ctx->out_sample_rate = 44100;
+	ctx->out_channel_layout = AV_CH_LAYOUT_STEREO;
+	ctx->out_channels = 2;
+	ctx->out_sample_format = AV_SAMPLE_FMT_S16;
+	ctx->out_byte_depth = 2; // Bytes per sample = 16/8
 	return 0;
 
       case XCODE_VIDEO:
@@ -418,7 +425,7 @@ open_output(struct transcode_ctx *ctx)
 	enc_ctx->flags |= CODEC_FLAG_GLOBAL_HEADER;
     }
 
-  // Init muxer (does this write wav header)?
+  // Notice, this will not write WAV header (so we do that manually)
   ret = avformat_write_header(ctx->ofmt_ctx, NULL);
   if (ret < 0)
     {
@@ -464,7 +471,7 @@ close_output(struct transcode_ctx *ctx)
   avformat_free_context(ctx->ofmt_ctx);
 }
 
-#if LIBAVCODEC_VERSION_MAJOR >= 56 || (LIBAVCODEC_VERSION_MAJOR == 55 && LIBAVCODEC_VERSION_MINOR >= 29)
+#ifdef HAVE_LIBAVFILTER
 static int
 open_filter(struct filter_ctx *filter_ctx, AVCodecContext *dec_ctx, AVCodecContext *enc_ctx, const char *filter_spec)
 {
@@ -756,7 +763,7 @@ encode_write_frame(struct transcode_ctx *ctx, AVFrame *filt_frame, unsigned int 
   return ret;
 }
 
-#if LIBAVCODEC_VERSION_MAJOR >= 56 || (LIBAVCODEC_VERSION_MAJOR == 55 && LIBAVCODEC_VERSION_MINOR >= 29)
+#ifdef HAVE_LIBAVFILTER
 static int
 filter_encode_write_frame(struct transcode_ctx *ctx, AVFrame *frame, unsigned int stream_index)
 {
@@ -920,7 +927,7 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
       in_stream = ctx->ifmt_ctx->streams[packet.stream_index];
       out_stream = ctx->ofmt_ctx->streams[stream_nb];
 
-#if LIBAVCODEC_VERSION_MAJOR >= 56 || (LIBAVCODEC_VERSION_MAJOR == 55 && LIBAVCODEC_VERSION_MINOR >= 29)
+#ifdef HAVE_LIBAVFILTER
       if (ctx->filter_ctx[packet.stream_index].filter_graph)
 #else
       if (1)
@@ -1000,7 +1007,7 @@ transcode_cleanup(struct transcode_ctx *ctx)
     {
       if (ctx->stream_map[i] < 0)
 	continue;
-#if LIBAVCODEC_VERSION_MAJOR >= 56 || (LIBAVCODEC_VERSION_MAJOR == 55 && LIBAVCODEC_VERSION_MINOR >= 29)
+#ifdef HAVE_LIBAVFILTER
       if (!ctx->filter_ctx[i].filter_graph)
 	continue;
 #endif
