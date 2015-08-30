@@ -31,14 +31,14 @@
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavfilter/avfiltergraph.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 
 #ifdef HAVE_LIBAVFILTER
 # include <libavfilter/avcodec.h>
-# include <libavfilter/avfiltergraph.h>
-# include <libavfilter/buffersink.h>
-# include <libavfilter/buffersrc.h>
-# include <libavutil/pixdesc.h>
 #else
 # include "ffmpeg-compat.c"
 #endif
@@ -58,13 +58,11 @@ static char *default_codecs = "mpeg,wav";
 static char *roku_codecs = "mpeg,mp4a,wma,wav";
 static char *itunes_codecs = "mpeg,mp4a,mp4v,alac,wav";
 
-#ifdef HAVE_LIBAVFILTER
 struct filter_ctx {
   AVFilterContext *buffersink_ctx;
   AVFilterContext *buffersrc_ctx;
   AVFilterGraph *filter_graph;
 };
-#endif
 
 struct transcode_ctx {
   AVFormatContext *ifmt_ctx;
@@ -75,9 +73,7 @@ struct transcode_ctx {
   AVStream *video_stream;
   AVStream *subtitle_stream;
 
-#ifdef HAVE_LIBAVFILTER
   struct filter_ctx *filter_ctx;
-#endif
 
   // The ffmpeg muxer writes to this buffer using the avio_evbuffer interface
   struct evbuffer *obuf;
@@ -198,7 +194,7 @@ init_profile(struct transcode_ctx *ctx, enum transcode_profile profile)
 	ctx->out_sample_rate = 44100;
 	ctx->out_channel_layout = AV_CH_LAYOUT_STEREO;
 	ctx->out_channels = 2;
-	ctx->out_sample_format = AV_SAMPLE_FMT_S16;
+	ctx->out_sample_format = AV_SAMPLE_FMT_S16P;
 	ctx->out_byte_depth = 2; // Bytes per sample = 16/8
 	return 0;
 
@@ -387,7 +383,7 @@ open_output(struct transcode_ctx *ctx)
 	encoder = avcodec_find_encoder(ctx->out_video_codec);
       else if (dec_ctx->codec_type == AVMEDIA_TYPE_SUBTITLE)
 	{
-	  avcodec_copy_context(enc_ctx, dec_ctx); // Just remux stream
+	  avcodec_copy_context(enc_ctx, dec_ctx); // Just remux stream?
 	  continue;
 	}
 
@@ -633,6 +629,146 @@ open_filter(struct filter_ctx *filter_ctx, AVCodecContext *dec_ctx, AVCodecConte
 
   return -1;
 }
+#else
+static int
+open_filter(struct filter_ctx *filter_ctx, AVCodecContext *dec_ctx, AVCodecContext *enc_ctx, const char *filter_spec)
+{
+
+  AVFilter *buffersrc = NULL;
+  AVFilter *format = NULL;
+  AVFilter *buffersink = NULL;
+  AVFilterContext *buffersrc_ctx = NULL;
+  AVFilterContext *format_ctx = NULL;
+  AVFilterContext *buffersink_ctx = NULL;
+  AVFilterGraph *filter_graph = avfilter_graph_alloc();
+  char args[512];
+  int ret;
+
+  if (!filter_graph)
+    {
+      DPRINTF(E_LOG, L_XCODE, "Out of memory for filter_graph\n");
+      goto out_fail;
+    }
+
+  if (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO)
+    {
+      buffersrc = avfilter_get_by_name("buffer");
+      format = avfilter_get_by_name("format");
+      buffersink = avfilter_get_by_name("buffersink");
+      if (!buffersrc || !format || !buffersink)
+	{
+	  DPRINTF(E_LOG, L_XCODE, "Filtering source, format or sink element not found\n");
+	  goto out_fail;
+	}
+
+      snprintf(args, sizeof(args),
+               "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d",
+               dec_ctx->width, dec_ctx->height, dec_ctx->pix_fmt,
+               dec_ctx->time_base.num, dec_ctx->time_base.den,
+               dec_ctx->sample_aspect_ratio.num,
+               dec_ctx->sample_aspect_ratio.den);
+
+      ret = avfilter_graph_create_filter(&buffersrc_ctx, buffersrc, "in", args, NULL, filter_graph);
+      if (ret < 0)
+	{
+	  DPRINTF(E_LOG, L_XCODE, "Cannot create buffer source\n");
+	  goto out_fail;
+	}
+
+      snprintf(args, sizeof(args),
+               "pix_fmt=%d",
+               enc_ctx->pix_fmt);
+
+      ret = avfilter_graph_create_filter(&format_ctx, format, "format", args, NULL, filter_graph);
+      if (ret < 0)
+	{
+	  DPRINTF(E_LOG, L_XCODE, "Cannot create format filter\n");
+	  goto out_fail;
+	}
+
+      ret = avfilter_graph_create_filter(&buffersink_ctx, buffersink, "out", NULL, NULL, filter_graph);
+      if (ret < 0)
+	{
+	  DPRINTF(E_LOG, L_XCODE, "Cannot create buffer sink\n");
+	  goto out_fail;
+	}
+    }
+  else if (dec_ctx->codec_type == AVMEDIA_TYPE_AUDIO)
+    {
+      buffersrc = avfilter_get_by_name("abuffer");
+      format = avfilter_get_by_name("aformat");
+      buffersink = avfilter_get_by_name("abuffersink");
+      if (!buffersrc || !format || !buffersink)
+	{
+	  DPRINTF(E_LOG, L_XCODE, "Filtering source, format or sink element not found\n");
+	  ret = AVERROR_UNKNOWN;
+	  goto out_fail;
+	}
+
+      if (!dec_ctx->channel_layout)
+	dec_ctx->channel_layout = av_get_default_channel_layout(dec_ctx->channels);
+
+      snprintf(args, sizeof(args),
+               "time_base=%d/%d:sample_rate=%d:sample_fmt=%s:channel_layout=0x%"PRIx64,
+               dec_ctx->time_base.num, dec_ctx->time_base.den, dec_ctx->sample_rate,
+               av_get_sample_fmt_name(dec_ctx->sample_fmt),
+               dec_ctx->channel_layout);
+
+      ret = avfilter_graph_create_filter(&buffersrc_ctx, buffersrc, "in", args, NULL, filter_graph);
+      if (ret < 0)
+	{
+	  DPRINTF(E_LOG, L_XCODE, "Cannot create audio buffer source\n");
+	  goto out_fail;
+	}
+
+      snprintf(args, sizeof(args),
+               "sample_fmts=%s:sample_rates=%d:channel_layouts=0x%"PRIx64,
+               av_get_sample_fmt_name(enc_ctx->sample_fmt), enc_ctx->sample_rate,
+               enc_ctx->channel_layout);
+
+      ret = avfilter_graph_create_filter(&format_ctx, format, "format", args, NULL, filter_graph);
+      if (ret < 0)
+	{
+	  DPRINTF(E_LOG, L_XCODE, "Cannot create audio format filter\n");
+	  goto out_fail;
+	}
+
+      ret = avfilter_graph_create_filter(&buffersink_ctx, buffersink, "out", NULL, NULL, filter_graph);
+      if (ret < 0)
+	{
+	  DPRINTF(E_LOG, L_XCODE, "Cannot create audio buffer sink\n");
+	  goto out_fail;
+	}
+    }
+  else
+    {
+      DPRINTF(E_LOG, L_XCODE, "Bug! Unknown type passed to filter graph init\n");
+      goto out_fail;
+    }
+
+  ret = avfilter_link(buffersrc_ctx, 0, format_ctx, 0);
+  if (ret >= 0)
+    ret = avfilter_link(format_ctx, 0, buffersink_ctx, 0);
+  if (ret < 0)
+    DPRINTF(E_LOG, L_XCODE, "Error connecting filters\n");
+
+  ret = avfilter_graph_config(filter_graph, NULL);
+  if (ret < 0)
+    goto out_fail;
+
+  /* Fill filtering context */
+  filter_ctx->buffersrc_ctx = buffersrc_ctx;
+  filter_ctx->buffersink_ctx = buffersink_ctx;
+  filter_ctx->filter_graph = filter_graph;
+
+  return 0;
+
+ out_fail:
+  avfilter_graph_free(&filter_graph);
+
+  return -1;
+}
+#endif
 
 static int
 open_filters(struct transcode_ctx *ctx)
@@ -700,18 +836,6 @@ close_filters(struct transcode_ctx *ctx)
     }
   av_free(ctx->filter_ctx);
 }
-#else
-static int
-open_filters(struct transcode_ctx *ctx)
-{
-  return 0;
-}
-static void
-close_filters(struct transcode_ctx *ctx)
-{
-  return;
-}
-#endif
 
 static int
 encode_write_frame(struct transcode_ctx *ctx, AVFrame *filt_frame, unsigned int stream_index, int *got_frame)
@@ -814,7 +938,59 @@ filter_encode_write_frame(struct transcode_ctx *ctx, AVFrame *frame, unsigned in
 static int
 filter_encode_write_frame(struct transcode_ctx *ctx, AVFrame *frame, unsigned int stream_index)
 {
-  return encode_write_frame(ctx, frame, stream_index, NULL);
+  AVFilterBufferRef *picref;
+  AVCodecContext *enc_ctx;
+  AVFrame *filt_frame;
+  int stream_nb;
+  int ret;
+
+  stream_nb = ctx->stream_map[stream_index];
+  enc_ctx = ctx->ofmt_ctx->streams[stream_nb]->codec;
+
+  // Push the decoded frame into the filtergraph
+  ret = av_buffersrc_write_frame(ctx->filter_ctx[stream_index].buffersrc_ctx, frame);
+  if (ret < 0)
+    {
+      DPRINTF(E_LOG, L_XCODE, "Error while feeding the filtergraph\n");
+      return -1;
+    }
+
+  // Pull filtered frames from the filtergraph
+  while (1)
+    {
+      filt_frame = av_frame_alloc();
+      if (!filt_frame)
+	{
+	  DPRINTF(E_LOG, L_XCODE, "Out of memory for filt_frame\n");
+	  return -1;
+	}
+
+      if (enc_ctx->codec_type == AVMEDIA_TYPE_AUDIO && !(enc_ctx->codec->capabilities & CODEC_CAP_VARIABLE_FRAME_SIZE))
+	ret = av_buffersink_read_samples(ctx->filter_ctx[stream_index].buffersink_ctx, &picref, enc_ctx->frame_size);
+      else
+	ret = av_buffersink_read(ctx->filter_ctx[stream_index].buffersink_ctx, &picref);
+
+      if (ret < 0)
+	{
+	  /* if no more frames for output - returns AVERROR(EAGAIN)
+	   * if flushed and no more frames for output - returns AVERROR_EOF
+	   * rewrite retcode to 0 to show it as normal procedure completion
+	   */
+	  if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+	    ret = 0;
+	  av_frame_free(&filt_frame);
+	  break;
+	}
+
+      avfilter_copy_buf_props(filt_frame, picref);
+      ret = encode_write_frame(ctx, filt_frame, stream_index, NULL);
+      av_frame_free(&filt_frame);
+      avfilter_unref_buffer(picref);
+      if (ret < 0)
+	break;
+    }
+
+  return ret;
 }
 #endif
 
@@ -927,11 +1103,7 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
       in_stream = ctx->ifmt_ctx->streams[packet.stream_index];
       out_stream = ctx->ofmt_ctx->streams[stream_nb];
 
-#ifdef HAVE_LIBAVFILTER
       if (ctx->filter_ctx[packet.stream_index].filter_graph)
-#else
-      if (1)
-#endif
 	{
 	  frame = av_frame_alloc();
 	  if (!frame)
@@ -1007,10 +1179,8 @@ transcode_cleanup(struct transcode_ctx *ctx)
     {
       if (ctx->stream_map[i] < 0)
 	continue;
-#ifdef HAVE_LIBAVFILTER
       if (!ctx->filter_ctx[i].filter_graph)
 	continue;
-#endif
       filter_encode_write_frame(ctx, NULL, i);
       flush_encoder(ctx, i);
     }

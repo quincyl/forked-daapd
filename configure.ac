@@ -141,7 +141,7 @@ if test x$use_libavfilter = xyes; then
 	PKG_CHECK_MODULES(LIBAV, [ libavformat libavcodec libswscale libavutil libavfilter ])
 	AC_DEFINE(HAVE_LIBAVFILTER, 1, [Define to 1 if you have ffmpeg's libavfilter])
 else
-	PKG_CHECK_MODULES(LIBAV, [ libavformat libavcodec libswscale libavutil ])
+	PKG_CHECK_MODULES(LIBAV, [ libavformat libavcodec libswscale libavutil libavfilter ])
 fi
 
 
