@@ -65,14 +65,16 @@ struct filter_ctx {
 };
 
 struct transcode_ctx {
+  // Input and output format context
   AVFormatContext *ifmt_ctx;
   AVFormatContext *ofmt_ctx;
 
-  // TODO maybe use these
+  // Will point to the max 3 streams that we will transcode
   AVStream *audio_stream;
   AVStream *video_stream;
   AVStream *subtitle_stream;
 
+  // We use filters to resample
   struct filter_ctx *filter_ctx;
 
   // The ffmpeg muxer writes to this buffer using the avio_evbuffer interface
@@ -89,11 +91,11 @@ struct transcode_ctx {
   int64_t prev_pts[MAX_STREAMS];
   int64_t offset_pts[MAX_STREAMS];
 
-  // Options for encoding and muxing
+  // Settings for encoding and muxing
   const char *out_format;
   int transcode_video;
 
-  // Audio
+  // Audio settings
   enum AVCodecID out_audio_codec;
   int out_sample_rate;
   uint64_t out_channel_layout;
@@ -101,22 +103,23 @@ struct transcode_ctx {
   enum AVSampleFormat out_sample_format;
   int out_byte_depth;
 
-  // Video
+  // Video settings
   enum AVCodecID out_video_codec;
   int out_video_height;
   int out_video_width;
 
-  // TODO
-  int need_resample;
-
+  // How many output bytes we have processed in total
   off_t offset;
+
+  // Duration and total sample count
   uint32_t duration;
   uint64_t samples;
 
-  uint32_t icy_hash;
+  // Used to check for ICY metadata changes at certain intervals
   uint32_t icy_interval;
+  uint32_t icy_hash;
 
-  /* WAV header */
+  // WAV header
   int wavhdr;
   uint8_t header[44];
 };
@@ -143,13 +146,18 @@ make_wav_header(struct transcode_ctx *ctx, off_t *est_size)
 {
   uint32_t wav_len;
   int duration;
+  int need_resample;
 
   if (ctx->duration)
     duration = ctx->duration;
   else
     duration = 3 * 60 * 1000; /* 3 minutes, in ms */
 
-  if (ctx->samples && !ctx->need_resample)
+  need_resample = (ctx->audio_stream->codec->sample_fmt != ctx->out_sample_format)
+                   || (ctx->audio_stream->codec->channels != ctx->out_channels)
+                   || (ctx->audio_stream->codec->sample_rate != ctx->out_sample_rate);
+
+  if (ctx->samples && !need_resample)
     wav_len = ctx->out_channels * ctx->out_byte_depth * ctx->samples;
   else
     wav_len = ctx->out_channels * ctx->out_byte_depth * ctx->out_sample_rate * (duration / 1000);
@@ -209,15 +217,32 @@ init_profile(struct transcode_ctx *ctx, enum transcode_profile profile)
 }
 
 static int
-open_input(struct transcode_ctx *ctx, const char *path)
+open_input(struct transcode_ctx *ctx, struct media_file_info *mfi)
 {
+  AVDictionary *options;
   AVCodec *decoder;
   unsigned int stream_index;
   int i;
   int ret;
 
+  options = NULL;
   ctx->ifmt_ctx = NULL;
-  ret = avformat_open_input(&ctx->ifmt_ctx, path, NULL, NULL);
+
+# ifndef HAVE_FFMPEG
+  // Without this, libav is slow to probe some internet streams, which leads to RAOP timeouts
+  if (mfi->data_kind == DATA_KIND_URL)
+    {
+      ctx->ifmt_ctx = avformat_alloc_context();
+      ctx->ifmt_ctx->probesize = 64000;
+    }
+# endif
+
+  if (mfi->data_kind == DATA_KIND_URL)
+    av_dict_set(&options, "icy", "1", 0);
+
+  ret = avformat_open_input(&ctx->ifmt_ctx, mfi->path, NULL, &options);
+  if (options)
+    av_dict_free(&options);
   if (ret < 0)
     {
       DPRINTF(E_LOG, L_XCODE, "Cannot open input path\n");
@@ -233,7 +258,7 @@ open_input(struct transcode_ctx *ctx, const char *path)
 
   if (ctx->ifmt_ctx->nb_streams > MAX_STREAMS)
     {
-      DPRINTF(E_LOG, L_XCODE, "File '%s' has too many streams (%u)\n", path, ctx->ifmt_ctx->nb_streams);
+      DPRINTF(E_LOG, L_XCODE, "File '%s' has too many streams (%u)\n", mfi->path, ctx->ifmt_ctx->nb_streams);
       goto out_fail;
     }
 
@@ -244,12 +269,16 @@ open_input(struct transcode_ctx *ctx, const char *path)
   stream_index = av_find_best_stream(ctx->ifmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, &decoder, 0);
   if ((stream_index < 0) || (!decoder))
     {
-      DPRINTF(E_LOG, L_XCODE, "Did not find audio stream or suitable decoder for %s\n", path);
+      DPRINTF(E_LOG, L_XCODE, "Did not find audio stream or suitable decoder for %s\n", mfi->path);
       goto out_fail;
     }
 
   ctx->ifmt_ctx->streams[stream_index]->codec->request_sample_fmt = ctx->out_sample_format;
   ctx->ifmt_ctx->streams[stream_index]->codec->request_channel_layout = ctx->out_channel_layout;
+
+// Disabled to see if it is still required
+//  if (decoder->capabilities & CODEC_CAP_TRUNCATED)
+//    ctx->ifmt_ctx->streams[stream_index]->codec->flags |= CODEC_FLAG_TRUNCATED;
 
   ret = avcodec_open2(ctx->ifmt_ctx->streams[stream_index]->codec, decoder, NULL);
   if (ret < 0)
@@ -270,7 +299,7 @@ open_input(struct transcode_ctx *ctx, const char *path)
   stream_index = av_find_best_stream(ctx->ifmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, &decoder, 0);
   if ((stream_index < 0) || (!decoder))
     {
-      DPRINTF(E_LOG, L_XCODE, "Did not find video stream or suitable decoder for %s\n", path);
+      DPRINTF(E_LOG, L_XCODE, "Did not find video stream or suitable decoder for %s\n", mfi->path);
 
       // Continue without video
       ctx->transcode_video = 0;
@@ -333,6 +362,7 @@ open_output(struct transcode_ctx *ctx)
   AVCodecContext *dec_ctx;
   AVCodecContext *enc_ctx;
   AVCodec *encoder;
+  enum AVCodecID codecid;
   int ret;
   int i;
 
@@ -376,20 +406,24 @@ open_output(struct transcode_ctx *ctx)
       dec_ctx = in_stream->codec;
       enc_ctx = out_stream->codec;
 
-      encoder = NULL;
-      if (dec_ctx->codec_type == AVMEDIA_TYPE_AUDIO)
-	encoder = avcodec_find_encoder(ctx->out_audio_codec);
-      else if (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO)
-	encoder = avcodec_find_encoder(ctx->out_video_codec);
-      else if (dec_ctx->codec_type == AVMEDIA_TYPE_SUBTITLE)
+      // TODO Enough to just remux subtitles?
+      if (dec_ctx->codec_type == AVMEDIA_TYPE_SUBTITLE)
 	{
-	  avcodec_copy_context(enc_ctx, dec_ctx); // Just remux stream?
+	  avcodec_copy_context(enc_ctx, dec_ctx);
 	  continue;
 	}
 
+      if (dec_ctx->codec_type == AVMEDIA_TYPE_AUDIO)
+	codecid = ctx->out_audio_codec;
+      else if (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO)
+	codecid = ctx->out_video_codec;
+      else
+	continue;
+
+      encoder = avcodec_find_encoder(codecid);
       if (!encoder)
 	{
-	  DPRINTF(E_LOG, L_XCODE, "Necessary encoder for input stream %u not found\n", i);
+	  DPRINTF(E_LOG, L_XCODE, "Necessary encoder (%s) for input stream %u not found\n", avcodec_get_name(codecid), i);
 	  goto out_fail_stream;
 	}
 
@@ -413,7 +447,7 @@ open_output(struct transcode_ctx *ctx)
       ret = avcodec_open2(enc_ctx, encoder, NULL);
       if (ret < 0)
 	{
-	  DPRINTF(E_LOG, L_XCODE, "Cannot open encoder for input stream #%u\n", i);
+	  DPRINTF(E_LOG, L_XCODE, "Cannot open encoder (%s) for input stream #%u\n", avcodec_get_name(codecid), i);
 	  goto out_fail_codec;
 	}
 
@@ -1032,7 +1066,7 @@ transcode_setup(enum transcode_profile profile, struct media_file_info *mfi, off
 
   if (init_profile(ctx, profile) < 0)
     goto out_fail_profile;
-  if (open_input(ctx, mfi->path) < 0)
+  if (open_input(ctx, mfi) < 0)
     goto out_fail_input;
   if (open_output(ctx) < 0)
     goto out_fail_output;
@@ -1138,7 +1172,6 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
 	}
       else
 	{
-	  DPRINTF(E_LOG, L_XCODE, "Remux without reencoding\n");
 	  /* remux this frame without reencoding */
 	  av_packet_rescale_ts(&packet, in_stream->time_base, out_stream->time_base);
 
@@ -1162,7 +1195,7 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
 
 end:
   if (ret < 0)
-    DPRINTF(E_LOG, L_XCODE, "Error occurred: %s\n", av_err2str(ret));
+    DPRINTF(E_LOG, L_XCODE, "Error occurred: %s (%d)\n", av_err2str(ret), ret);
   else
     ret = processed;
 
