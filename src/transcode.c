@@ -362,7 +362,8 @@ open_output(struct transcode_ctx *ctx)
   AVCodecContext *dec_ctx;
   AVCodecContext *enc_ctx;
   AVCodec *encoder;
-  enum AVCodecID codecid;
+  const AVCodecDescriptor *codec_desc;
+  enum AVCodecID codec_id;
   int ret;
   int i;
 
@@ -414,16 +415,18 @@ open_output(struct transcode_ctx *ctx)
 	}
 
       if (dec_ctx->codec_type == AVMEDIA_TYPE_AUDIO)
-	codecid = ctx->out_audio_codec;
+	codec_id = ctx->out_audio_codec;
       else if (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO)
-	codecid = ctx->out_video_codec;
+	codec_id = ctx->out_video_codec;
       else
 	continue;
 
-      encoder = avcodec_find_encoder(codecid);
+      codec_desc = avcodec_descriptor_get(codec_id);
+
+      encoder = avcodec_find_encoder(codec_id);
       if (!encoder)
 	{
-	  DPRINTF(E_LOG, L_XCODE, "Necessary encoder (%s) for input stream %u not found\n", avcodec_get_name(codecid), i);
+	  DPRINTF(E_LOG, L_XCODE, "Necessary encoder (%s) for input stream %u not found\n", codec_desc->name, i);
 	  goto out_fail_stream;
 	}
 
@@ -447,7 +450,7 @@ open_output(struct transcode_ctx *ctx)
       ret = avcodec_open2(enc_ctx, encoder, NULL);
       if (ret < 0)
 	{
-	  DPRINTF(E_LOG, L_XCODE, "Cannot open encoder (%s) for input stream #%u\n", avcodec_get_name(codecid), i);
+	  DPRINTF(E_LOG, L_XCODE, "Cannot open encoder (%s) for input stream #%u\n", codec_desc->name, i);
 	  goto out_fail_codec;
 	}
 
