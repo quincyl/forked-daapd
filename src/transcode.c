@@ -1106,6 +1106,7 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
   AVPacket packet = { .data = NULL, .size = 0 };
   AVStream *in_stream, *out_stream;
   AVFrame *frame = NULL;
+  char errbuf[128];
   int stream_nb;
   int processed;
   int got_frame;
@@ -1198,7 +1199,10 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
 
 end:
   if (ret < 0)
-    DPRINTF(E_LOG, L_XCODE, "Error occurred: %s (%d)\n", av_err2str(ret), ret);
+    {
+      av_strerror(ret, errbuf, sizeof(errbuf));
+      DPRINTF(E_LOG, L_XCODE, "Error occurred: %s\n", errbuf);
+    }
   else
     ret = processed;
 

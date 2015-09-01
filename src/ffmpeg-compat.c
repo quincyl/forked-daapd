@@ -6,7 +6,6 @@
 #define av_frame_alloc() avcodec_alloc_frame()
 #define av_copy_packet(dst, src) memcpy(dst, src, sizeof(AVPacket))
 #define av_frame_get_best_effort_timestamp(x) (x)->pts
-#define av_err2str(x) "unknown"
 
 void av_packet_rescale_ts(AVPacket *pkt, AVRational src_tb, AVRational dst_tb)
 {
