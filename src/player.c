@@ -1467,8 +1467,8 @@ source_next(int force)
   /* Playlist has only one file, not a user action, treat as REPEAT_ALL
    * and source_check() will stop playback
    */
-  else if (!force && (r_mode == REPEAT_OFF) && (source_head == source_head->pl_next))
-    r_mode = REPEAT_SONG;
+//  else if (!force && (r_mode == REPEAT_OFF) && (source_head == source_head->pl_next))
+//    r_mode = REPEAT_SONG;
 
   if (!cur_streaming)
     ps = head;
@@ -1525,15 +1525,20 @@ source_next(int force)
       case REPEAT_OFF:
 	limit = head;
 
-	if (force && (ps == limit))
+	if (ps == limit)
 	  {
 	    DPRINTF(E_DBG, L_PLAYER, "End of playlist reached and repeat is OFF\n");
 
+DPRINTF(E_DBG, L_PLAYER, "CP RETURNING1\n");
 	    playback_abort();
-	    return 0;
+
+DPRINTF(E_DBG, L_PLAYER, "CP RETURNING2\n");
+
+	    return -1;
 	  }
 	break;
     }
+DPRINTF(E_DBG, L_PLAYER, "CP RETURNING3\n");
 
   do
     {
@@ -1934,6 +1939,8 @@ playback_write(void)
   uint8_t rawbuf[STOB(AIRTUNES_V2_PACKET_SAMPLES)];
   int ret;
 
+DPRINTF(E_DBG, L_PLAYER, "CP1\n");
+
   source_check();
   /* Make sure playback is still running after source_check() */
   if (player_state == PLAY_STOPPED)
@@ -1942,8 +1949,10 @@ playback_write(void)
   last_rtptime += AIRTUNES_V2_PACKET_SAMPLES;
 
   memset(rawbuf, 0, sizeof(rawbuf));
+DPRINTF(E_DBG, L_PLAYER, "CP2\n");
 
   ret = source_read(rawbuf, sizeof(rawbuf), last_rtptime);
+DPRINTF(E_DBG, L_PLAYER, "CP3\n");
   if (ret < 0)
     {
       DPRINTF(E_DBG, L_PLAYER, "Error reading from source, aborting playback\n");
@@ -1951,12 +1960,15 @@ playback_write(void)
       playback_abort();
       return;
     }
+DPRINTF(E_DBG, L_PLAYER, "CP4\n");
 
   if (laudio_status & LAUDIO_F_STARTED)
     laudio_write(rawbuf, last_rtptime);
+DPRINTF(E_DBG, L_PLAYER, "CP5\n");
 
   if (raop_sessions > 0)
     raop_v2_write(rawbuf, last_rtptime);
+DPRINTF(E_DBG, L_PLAYER, "CP6\n");
 }
 
 static void
