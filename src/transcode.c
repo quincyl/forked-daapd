@@ -1110,6 +1110,7 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
   int stream_nb;
   int processed;
   int got_frame;
+  int retry;
   int ret;
 
   if (ctx->wavhdr && (ctx->offset == 0))
@@ -1120,6 +1121,7 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
     }
 
   ret = 0;
+  retry = 0;
   processed = 0;
   while (processed < wanted)
     {
@@ -1156,10 +1158,23 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
 	    ret = avcodec_decode_audio4(in_stream->codec, frame, &got_frame, &packet);
 	  else
 	    ret = avcodec_decode_video2(in_stream->codec, frame, &got_frame, &packet);
-	  if (ret < 0)
+
+	  if (ret >= 0)
+	    retry = 0;
+	  else if (!retry)
 	    {
 	      av_frame_free(&frame);
-	      DPRINTF(E_LOG, L_XCODE, "Decoding failed\n");
+	      av_free_packet(&packet);
+
+	      DPRINTF(E_WARN, L_XCODE, "Couldn't decode packet, let's try the next one\n");
+	      retry = 1;
+	      continue;
+	    }
+	  else
+	    {
+	      av_frame_free(&frame);
+
+	      DPRINTF(E_LOG, L_XCODE, "Couldn't decode packet after two attempts, giving up\n");
 	      break;
 	    }
 
