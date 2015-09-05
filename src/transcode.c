@@ -53,6 +53,8 @@ static char *default_codecs = "mpeg,wav";
 static char *roku_codecs = "mpeg,mp4a,wma,wav";
 static char *itunes_codecs = "mpeg,mp4a,mp4v,alac,wav";
 
+static char errbuf[128];
+
 struct filter_ctx {
   AVFilterContext *buffersink_ctx;
   AVFilterContext *buffersrc_ctx;
@@ -1309,6 +1311,11 @@ transcode_decode(struct decode_ctx *ctx)
   int got_frame;
   int ret;
 
+  // Read a packet
+  packet.data = NULL;
+  packet.size = 0;
+  av_init_packet(&packet);
+
   while (1)
     {
       if (ctx->resume)
@@ -1317,7 +1324,11 @@ transcode_decode(struct decode_ctx *ctx)
 	  ctx->resume = 0;
         }
       else if ((ret = av_read_frame(ctx->ifmt_ctx, &packet)) < 0)
-        return NULL;
+	{
+	  av_strerror(ret, errbuf, sizeof(errbuf));
+	  DPRINTF(E_LOG, L_XCODE, "Error trying to read frame: %s\n", errbuf);
+          return NULL;
+	}
 
       stream_index = packet.stream_index;
       in_stream = ctx->ifmt_ctx->streams[stream_index];
@@ -1327,6 +1338,7 @@ transcode_decode(struct decode_ctx *ctx)
       av_free_packet(&packet);
     }
 
+  // Decode into a frame
   frame = av_frame_alloc();
   if (!frame)
     {
@@ -1344,6 +1356,7 @@ transcode_decode(struct decode_ctx *ctx)
 
   av_free_packet(&packet);
 
+  // On failure, try reading another packet (just one)
   if (!got_frame || (ret < 0))
     {
       av_frame_free(&frame);
@@ -1367,12 +1380,14 @@ transcode_decode(struct decode_ctx *ctx)
 	}
     }
 
+  // Return the decoded frame and stream index
   frame->pts = av_frame_get_best_effort_timestamp(frame);
 
   decoded = malloc(sizeof(struct decoded_packet));
   if (!decoded)
     {
       DPRINTF(E_LOG, L_XCODE, "Out of memory for decoded result\n");
+      av_frame_free(&frame);
       return NULL;
     }
 
@@ -1386,7 +1401,6 @@ transcode_decode(struct decode_ctx *ctx)
 int
 transcode_encode(struct evbuffer *evbuf, struct decoded_packet *decoded, struct encode_ctx *ctx)
 {
-  char errbuf[128];
   int encoded_length;
   int ret;
 
@@ -1459,7 +1473,6 @@ transcode_seek(struct transcode_ctx *ctx, int ms)
   int64_t target_pts;
   int64_t got_pts;
   int got_ms;
-  int flags;
   int ret;
   int i;
 
@@ -1490,7 +1503,6 @@ transcode_seek(struct transcode_ctx *ctx, int ms)
 
   // Fast forward until first packet with a timestamp is found
   in_stream->codec->skip_frame = AVDISCARD_NONREF;
-  flags = 0;
   while (1)
     {
       av_free_packet(&decode_ctx->seek_packet);
@@ -1499,8 +1511,8 @@ transcode_seek(struct transcode_ctx *ctx, int ms)
       if (ret < 0)
 	{
 	  DPRINTF(E_WARN, L_XCODE, "Could not read more data while seeking\n");
-	  flags = 1;
-	  break;
+	  in_stream->codec->skip_frame = AVDISCARD_DEFAULT;
+	  return -1;
 	}
 
       if (decode_ctx->seek_packet.stream_index != in_stream->index)
@@ -1514,11 +1526,7 @@ transcode_seek(struct transcode_ctx *ctx, int ms)
     }
   in_stream->codec->skip_frame = AVDISCARD_DEFAULT;
 
-  // Error while reading frame above
-  if (flags)
-    return -1;
-
-  // Tell transcode() to resume with seek_packet
+  // Tell transcode_decode() to resume with seek_packet
   decode_ctx->resume = 1;
 
   // Compute position in ms from pts
