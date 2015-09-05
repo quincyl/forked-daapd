@@ -126,6 +126,8 @@ static pthread_t tid_httpd;
 struct stream_ctx *g_st;
 #endif
 
+//#include "icecast.c"
+
 static void
 stream_end(struct stream_ctx *st, int failed)
 {
@@ -447,7 +449,7 @@ httpd_stream_file(struct evhttp_request *req, int id)
 
       stream_cb = stream_chunk_xcode_cb;
 
-      st->xcode = transcode_setup(XCODE_PCM16_HEADER, mfi, &st->size);
+      st->xcode = transcode_setup(mfi, XCODE_PCM16_HEADER, &st->size);
       if (!st->xcode)
 	{
 	  DPRINTF(E_WARN, L_HTTPD, "Transcoding setup failed, aborting streaming\n");
@@ -1036,7 +1038,13 @@ httpd_gen_cb(struct evhttp_request *req, void *arg)
 
       goto out;
     }
+/*  else if (icecast_is_request(req, uri))
+    {
+      icecast_request(req);
 
+      goto out;
+    }
+*/
   DPRINTF(E_DBG, L_HTTPD, "HTTP request: %s\n", uri);
 
   /* Serve web interface files */

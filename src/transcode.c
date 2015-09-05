@@ -1,11 +1,6 @@
 /*
  * Copyright (C) 2015 Espen Jurgensen
  *
- * Adapted from ffmpeg example:
- * Copyright (c) 2010 Nicolas George
- * Copyright (c) 2011 Stefano Sabatini
- * Copyright (c) 2014 Andrey Utkin
- *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
@@ -64,15 +59,30 @@ struct filter_ctx {
   AVFilterGraph *filter_graph;
 };
 
-struct transcode_ctx {
-  // Input and output format context
+struct decode_ctx {
+  // Input format context
   AVFormatContext *ifmt_ctx;
-  AVFormatContext *ofmt_ctx;
 
   // Will point to the max 3 streams that we will transcode
   AVStream *audio_stream;
   AVStream *video_stream;
   AVStream *subtitle_stream;
+
+  // Duration and total sample count
+  uint32_t duration;
+  uint64_t samples;
+
+  // Used for seeking
+  int resume;
+  AVPacket seek_packet;
+
+  // Used to keep track of retries when decoding fails
+  int retry;
+};
+
+struct encode_ctx {
+  // Output format context
+  AVFormatContext *ofmt_ctx;
 
   // We use filters to resample
   struct filter_ctx *filter_ctx;
@@ -86,14 +96,12 @@ struct transcode_ctx {
   int stream_map[MAX_STREAMS];
 
   // Used for seeking
-  int resume;
-  AVPacket seek_packet;
   int64_t prev_pts[MAX_STREAMS];
   int64_t offset_pts[MAX_STREAMS];
 
   // Settings for encoding and muxing
   const char *out_format;
-  int transcode_video;
+  int encode_video;
 
   // Audio settings
   enum AVCodecID out_audio_codec;
@@ -109,11 +117,7 @@ struct transcode_ctx {
   int out_video_width;
 
   // How many output bytes we have processed in total
-  off_t offset;
-
-  // Duration and total sample count
-  uint32_t duration;
-  uint64_t samples;
+  off_t total_bytes;
 
   // Used to check for ICY metadata changes at certain intervals
   uint32_t icy_interval;
@@ -124,6 +128,60 @@ struct transcode_ctx {
   uint8_t header[44];
 };
 
+struct transcode_ctx {
+  struct decode_ctx *decode_ctx;
+  struct encode_ctx *encode_ctx;
+};
+
+struct decoded_packet
+{
+  AVFrame *frame;
+  unsigned int stream_index;
+};
+
+
+/* -------------------------- PROFILE CONFIGURATION ------------------------ */
+
+static int
+init_profile(struct encode_ctx *ctx, enum transcode_profile profile)
+{
+  switch (profile)
+    {
+      case XCODE_PCM16_NOHEADER:
+      case XCODE_PCM16_HEADER:
+        ctx->encode_video = 0;
+	ctx->out_format = "s16le";
+	ctx->out_audio_codec = AV_CODEC_ID_PCM_S16LE;
+	ctx->out_sample_rate = 44100;
+	ctx->out_channel_layout = AV_CH_LAYOUT_STEREO;
+	ctx->out_channels = 2;
+	ctx->out_sample_format = AV_SAMPLE_FMT_S16;
+	ctx->out_byte_depth = 2; // Bytes per sample = 16/8
+	return 0;
+
+      case XCODE_MP3:
+        ctx->encode_video = 0;
+	ctx->out_format = "mp3";
+	ctx->out_audio_codec = AV_CODEC_ID_MP3;
+	ctx->out_sample_rate = 44100;
+	ctx->out_channel_layout = AV_CH_LAYOUT_STEREO;
+	ctx->out_channels = 2;
+	ctx->out_sample_format = AV_SAMPLE_FMT_S16P;
+	ctx->out_byte_depth = 2; // Bytes per sample = 16/8
+	return 0;
+
+      case XCODE_H264_AAC:
+        ctx->encode_video = 1;
+	return 0;
+
+      default:
+	DPRINTF(E_LOG, L_XCODE, "Bug! Unknown transcoding profile\n");
+	return -1;
+    }
+}
+
+
+/* -------------------------------- HELPERS -------------------------------- */
 
 static inline void
 add_le16(uint8_t *dst, uint16_t val)
@@ -142,23 +200,23 @@ add_le32(uint8_t *dst, uint32_t val)
 }
 
 static void
-make_wav_header(struct transcode_ctx *ctx, off_t *est_size)
+make_wav_header(struct encode_ctx *ctx, struct decode_ctx *src_ctx, off_t *est_size)
 {
   uint32_t wav_len;
   int duration;
   int need_resample;
 
-  if (ctx->duration)
-    duration = ctx->duration;
+  if (src_ctx->duration)
+    duration = src_ctx->duration;
   else
     duration = 3 * 60 * 1000; /* 3 minutes, in ms */
 
-  need_resample = (ctx->audio_stream->codec->sample_fmt != ctx->out_sample_format)
-                   || (ctx->audio_stream->codec->channels != ctx->out_channels)
-                   || (ctx->audio_stream->codec->sample_rate != ctx->out_sample_rate);
+  need_resample = (src_ctx->audio_stream->codec->sample_fmt != ctx->out_sample_format)
+                   || (src_ctx->audio_stream->codec->channels != ctx->out_channels)
+                   || (src_ctx->audio_stream->codec->sample_rate != ctx->out_sample_rate);
 
-  if (ctx->samples && !need_resample)
-    wav_len = ctx->out_channels * ctx->out_byte_depth * ctx->samples;
+  if (src_ctx->samples && !need_resample)
+    wav_len = ctx->out_channels * ctx->out_byte_depth * src_ctx->samples;
   else
     wav_len = ctx->out_channels * ctx->out_byte_depth * ctx->out_sample_rate * (duration / 1000);
 
@@ -179,50 +237,206 @@ make_wav_header(struct transcode_ctx *ctx, off_t *est_size)
 }
 
 static int
-init_profile(struct transcode_ctx *ctx, enum transcode_profile profile)
+decode_stream(struct decode_ctx *ctx, AVStream *in_stream)
 {
-  switch (profile)
-    {
-      case XCODE_PCM16_NOHEADER:
-      case XCODE_PCM16_HEADER:
-        ctx->transcode_video = 0;
-	ctx->out_format = "s16le";
-	ctx->out_audio_codec = AV_CODEC_ID_PCM_S16LE;
-	ctx->out_sample_rate = 44100;
-	ctx->out_channel_layout = AV_CH_LAYOUT_STEREO;
-	ctx->out_channels = 2;
-	ctx->out_sample_format = AV_SAMPLE_FMT_S16;
-	ctx->out_byte_depth = 2; // Bytes per sample = 16/8
-	return 0;
-
-      case XCODE_MP3:
-        ctx->transcode_video = 0;
-	ctx->out_format = "mp3";
-	ctx->out_audio_codec = AV_CODEC_ID_MP3;
-	ctx->out_sample_rate = 44100;
-	ctx->out_channel_layout = AV_CH_LAYOUT_STEREO;
-	ctx->out_channels = 2;
-	ctx->out_sample_format = AV_SAMPLE_FMT_S16P;
-	ctx->out_byte_depth = 2; // Bytes per sample = 16/8
-	return 0;
-
-      case XCODE_VIDEO:
-        ctx->transcode_video = 1;
-	return 0;
-
-      default:
-	DPRINTF(E_LOG, L_XCODE, "Bug! Unknown transcoding profile\n");
-	return -1;
-    }
+  return ((in_stream == ctx->audio_stream) ||
+          (in_stream == ctx->video_stream) ||
+          (in_stream == ctx->subtitle_stream));
 }
 
 static int
-open_input(struct transcode_ctx *ctx, struct media_file_info *mfi)
+encode_write_frame(struct encode_ctx *ctx, AVFrame *filt_frame, unsigned int stream_index, int *got_frame)
+{
+  AVStream *out_stream;
+  AVPacket enc_pkt;
+  int ret;
+  int got_frame_local;
+  int stream_nb;
+
+  if (!got_frame)
+    got_frame = &got_frame_local;
+
+  stream_nb = ctx->stream_map[stream_index];
+  out_stream = ctx->ofmt_ctx->streams[stream_nb];
+
+  // Encode filtered frame
+  enc_pkt.data = NULL;
+  enc_pkt.size = 0;
+  av_init_packet(&enc_pkt);
+
+  if (out_stream->codec->codec_type == AVMEDIA_TYPE_AUDIO)
+    ret = avcodec_encode_audio2(out_stream->codec, &enc_pkt, filt_frame, got_frame);
+  else if (out_stream->codec->codec_type == AVMEDIA_TYPE_VIDEO)
+    ret = avcodec_encode_video2(out_stream->codec, &enc_pkt, filt_frame, got_frame);
+  else
+    return -1;
+
+  if (ret < 0)
+    return -1;
+  if (!(*got_frame))
+    return 0;
+
+  // Prepare packet for muxing
+  enc_pkt.stream_index = stream_nb;
+
+  // This "wonderful" peace of code makes sure that the timestamp never decreases,
+  // even if the user seeked backwards. The muxer will not accept decreasing
+  // timestamps
+  enc_pkt.pts += ctx->offset_pts[stream_nb];
+  if (enc_pkt.pts < ctx->prev_pts[stream_nb])
+    {
+      ctx->offset_pts[stream_nb] += ctx->prev_pts[stream_nb] - enc_pkt.pts;
+      enc_pkt.pts = ctx->prev_pts[stream_nb];
+    }
+  ctx->prev_pts[stream_nb] = enc_pkt.pts;
+  enc_pkt.dts = enc_pkt.pts; //FIXME
+
+  av_packet_rescale_ts(&enc_pkt, out_stream->codec->time_base, out_stream->time_base);
+
+  // Mux encoded frame
+  ret = av_interleaved_write_frame(ctx->ofmt_ctx, &enc_pkt);
+  return ret;
+}
+
+#ifdef HAVE_LIBAVFILTER
+static int
+filter_encode_write_frame(struct encode_ctx *ctx, AVFrame *frame, unsigned int stream_index)
+{
+  AVFrame *filt_frame;
+  int ret;
+
+  // Push the decoded frame into the filtergraph
+  ret = av_buffersrc_add_frame_flags(ctx->filter_ctx[stream_index].buffersrc_ctx, frame, 0);
+  if (ret < 0)
+    {
+      DPRINTF(E_LOG, L_XCODE, "Error while feeding the filtergraph\n");
+      return -1;
+    }
+
+  // Pull filtered frames from the filtergraph
+  while (1)
+    {
+      filt_frame = av_frame_alloc();
+      if (!filt_frame)
+	{
+	  DPRINTF(E_LOG, L_XCODE, "Out of memory for filt_frame\n");
+	  return -1;
+	}
+
+      ret = av_buffersink_get_frame(ctx->filter_ctx[stream_index].buffersink_ctx, filt_frame);
+      if (ret < 0)
+	{
+	  /* if no more frames for output - returns AVERROR(EAGAIN)
+	   * if flushed and no more frames for output - returns AVERROR_EOF
+	   * rewrite retcode to 0 to show it as normal procedure completion
+	   */
+	  if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+	    ret = 0;
+	  av_frame_free(&filt_frame);
+	  break;
+	}
+
+      filt_frame->pict_type = AV_PICTURE_TYPE_NONE;
+      ret = encode_write_frame(ctx, filt_frame, stream_index, NULL);
+      av_frame_free(&filt_frame);
+      if (ret < 0)
+	break;
+    }
+
+  return ret;
+}
+#else
+static int
+filter_encode_write_frame(struct encode_ctx *ctx, AVFrame *frame, unsigned int stream_index)
+{
+  AVFilterBufferRef *picref;
+  AVCodecContext *enc_ctx;
+  AVFrame *filt_frame;
+  int stream_nb;
+  int ret;
+
+  stream_nb = ctx->stream_map[stream_index];
+  enc_ctx = ctx->ofmt_ctx->streams[stream_nb]->codec;
+
+  // Push the decoded frame into the filtergraph
+  ret = av_buffersrc_write_frame(ctx->filter_ctx[stream_index].buffersrc_ctx, frame);
+  if (ret < 0)
+    {
+      DPRINTF(E_LOG, L_XCODE, "Error while feeding the filtergraph\n");
+      return -1;
+    }
+
+  // Pull filtered frames from the filtergraph
+  while (1)
+    {
+      filt_frame = av_frame_alloc();
+      if (!filt_frame)
+	{
+	  DPRINTF(E_LOG, L_XCODE, "Out of memory for filt_frame\n");
+	  return -1;
+	}
+
+      if (enc_ctx->codec_type == AVMEDIA_TYPE_AUDIO && !(enc_ctx->codec->capabilities & CODEC_CAP_VARIABLE_FRAME_SIZE))
+	ret = av_buffersink_read_samples(ctx->filter_ctx[stream_index].buffersink_ctx, &picref, enc_ctx->frame_size);
+      else
+	ret = av_buffersink_read(ctx->filter_ctx[stream_index].buffersink_ctx, &picref);
+
+      if (ret < 0)
+	{
+	  /* if no more frames for output - returns AVERROR(EAGAIN)
+	   * if flushed and no more frames for output - returns AVERROR_EOF
+	   * rewrite retcode to 0 to show it as normal procedure completion
+	   */
+	  if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+	    ret = 0;
+	  av_frame_free(&filt_frame);
+	  break;
+	}
+
+      avfilter_copy_buf_props(filt_frame, picref);
+      ret = encode_write_frame(ctx, filt_frame, stream_index, NULL);
+      av_frame_free(&filt_frame);
+      avfilter_unref_buffer(picref);
+      if (ret < 0)
+	break;
+    }
+
+  return ret;
+}
+#endif
+
+static void
+flush_encoder(struct encode_ctx *ctx, unsigned int stream_index)
+{
+  int stream_nb;
+  int ret;
+  int got_frame;
+
+  stream_nb = ctx->stream_map[stream_index];
+  if (stream_nb < 0)
+    return;
+
+  DPRINTF(E_DBG, L_XCODE, "Flushing output stream #%u encoder\n", stream_nb);
+
+  if (!(ctx->ofmt_ctx->streams[stream_nb]->codec->codec->capabilities & CODEC_CAP_DELAY))
+    return;
+
+  do
+    {
+      ret = encode_write_frame(ctx, NULL, stream_index, &got_frame);
+    }
+  while ((ret == 0) && got_frame);
+}
+
+
+/* --------------------------- INPUT/OUTPUT INIT --------------------------- */
+
+static int
+open_input(struct decode_ctx *ctx, struct media_file_info *mfi, int decode_video)
 {
   AVDictionary *options;
   AVCodec *decoder;
   unsigned int stream_index;
-  int i;
   int ret;
 
   options = NULL;
@@ -262,9 +476,6 @@ open_input(struct transcode_ctx *ctx, struct media_file_info *mfi)
       goto out_fail;
     }
 
-  for (i = 0; i < ctx->ifmt_ctx->nb_streams; i++)
-    ctx->stream_map[i] = -1;  // Default: Don't transcode
-
   // Find audio stream and open decoder    
   stream_index = av_find_best_stream(ctx->ifmt_ctx, AVMEDIA_TYPE_AUDIO, -1, -1, &decoder, 0);
   if ((stream_index < 0) || (!decoder))
@@ -273,8 +484,8 @@ open_input(struct transcode_ctx *ctx, struct media_file_info *mfi)
       goto out_fail;
     }
 
-  ctx->ifmt_ctx->streams[stream_index]->codec->request_sample_fmt = ctx->out_sample_format;
-  ctx->ifmt_ctx->streams[stream_index]->codec->request_channel_layout = ctx->out_channel_layout;
+  ctx->ifmt_ctx->streams[stream_index]->codec->request_sample_fmt = AV_SAMPLE_FMT_S16;
+  ctx->ifmt_ctx->streams[stream_index]->codec->request_channel_layout = AV_CH_LAYOUT_STEREO;
 
 // Disabled to see if it is still required
 //  if (decoder->capabilities & CODEC_CAP_TRUNCATED)
@@ -287,12 +498,10 @@ open_input(struct transcode_ctx *ctx, struct media_file_info *mfi)
       goto out_fail;
     }
 
-  // Mark for transcoding - actual output stream will be set by open_output()
-  ctx->stream_map[stream_index] = 1;
   ctx->audio_stream = ctx->ifmt_ctx->streams[stream_index];
 
   // If no video then we are all done
-  if (!ctx->transcode_video)
+  if (!decode_video)
     return 0;
 
   // Find video stream and open decoder    
@@ -300,9 +509,6 @@ open_input(struct transcode_ctx *ctx, struct media_file_info *mfi)
   if ((stream_index < 0) || (!decoder))
     {
       DPRINTF(E_LOG, L_XCODE, "Did not find video stream or suitable decoder for %s\n", mfi->path);
-
-      // Continue without video
-      ctx->transcode_video = 0;
       return 0;
     }
 
@@ -310,20 +516,15 @@ open_input(struct transcode_ctx *ctx, struct media_file_info *mfi)
   if (ret < 0)
     {
       DPRINTF(E_LOG, L_XCODE, "Failed to open decoder for stream #%u\n", stream_index);
-
-      ctx->transcode_video = 0;
       return 0;
     }
 
-  // Mark for transcoding - actual output stream will be set by open_output()
-  ctx->stream_map[stream_index] = 1;
   ctx->video_stream = ctx->ifmt_ctx->streams[stream_index];
 
   // Find a (random) subtitle stream which will be remuxed
   stream_index = av_find_best_stream(ctx->ifmt_ctx, AVMEDIA_TYPE_SUBTITLE, -1, -1, NULL, 0);
   if (stream_index >= 0)
     {
-      ctx->stream_map[stream_index] = 1;
       ctx->subtitle_stream = ctx->ifmt_ctx->streams[stream_index];
     }
 
@@ -336,26 +537,18 @@ open_input(struct transcode_ctx *ctx, struct media_file_info *mfi)
 }
 
 static void
-close_input(struct transcode_ctx *ctx)
+close_input(struct decode_ctx *ctx)
 {
-  AVCodecContext *dec_ctx;
-  int i;
-
-  for (i = 0; i < ctx->ifmt_ctx->nb_streams; i++)
-    {
-      if (ctx->stream_map[i] < 0)
-	continue;
-
-      dec_ctx = ctx->ifmt_ctx->streams[i]->codec;
-      if ((dec_ctx->codec_type == AVMEDIA_TYPE_AUDIO) || (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO))
-	avcodec_close(dec_ctx);
-    }
+  if (ctx->audio_stream)
+    avcodec_close(ctx->audio_stream->codec);
+  if (ctx->video_stream)
+    avcodec_close(ctx->video_stream->codec);
 
   avformat_close_input(&ctx->ifmt_ctx);
 }
 
 static int
-open_output(struct transcode_ctx *ctx)
+open_output(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
 {
   AVStream *out_stream;
   AVStream *in_stream;
@@ -389,12 +582,15 @@ open_output(struct transcode_ctx *ctx)
       goto out_fail_pb;
     }
 
-  for (i = 0; i < ctx->ifmt_ctx->nb_streams; i++)
+  for (i = 0; i < src_ctx->ifmt_ctx->nb_streams; i++)
     { 
-      if (ctx->stream_map[i] < 0)
-        continue;
+      in_stream = src_ctx->ifmt_ctx->streams[i];
+      if (!decode_stream(src_ctx, in_stream))
+	{
+	  ctx->stream_map[i] = -1;
+	  continue;
+	}
 
-      in_stream = ctx->ifmt_ctx->streams[i];
       out_stream = avformat_new_stream(ctx->ofmt_ctx, NULL);
       if (!out_stream)
 	{
@@ -422,11 +618,13 @@ open_output(struct transcode_ctx *ctx)
 	continue;
 
       codec_desc = avcodec_descriptor_get(codec_id);
-
       encoder = avcodec_find_encoder(codec_id);
       if (!encoder)
 	{
-	  DPRINTF(E_LOG, L_XCODE, "Necessary encoder (%s) for input stream %u not found\n", codec_desc->name, i);
+	  if (codec_desc)
+	    DPRINTF(E_LOG, L_XCODE, "Necessary encoder (%s) for input stream %u not found\n", codec_desc->name, i);
+	  else
+	    DPRINTF(E_LOG, L_XCODE, "Necessary encoder (unknown) for input stream %u not found\n", i);
 	  goto out_fail_stream;
 	}
 
@@ -487,16 +685,14 @@ open_output(struct transcode_ctx *ctx)
 }
 
 static void
-close_output(struct transcode_ctx *ctx)
+close_output(struct encode_ctx *ctx)
 {
-  AVCodecContext *enc_ctx;
   int i;
 
   for (i = 0; i < ctx->ofmt_ctx->nb_streams; i++)
     {
-      enc_ctx = ctx->ofmt_ctx->streams[i]->codec;
-      if (enc_ctx)
-	avcodec_close(enc_ctx);
+      if (ctx->ofmt_ctx->streams[i]->codec)
+	avcodec_close(ctx->ofmt_ctx->streams[i]->codec);
     }
 
   avio_evbuffer_close(ctx->ofmt_ctx->pb);
@@ -808,22 +1004,23 @@ open_filter(struct filter_ctx *filter_ctx, AVCodecContext *dec_ctx, AVCodecConte
 #endif
 
 static int
-open_filters(struct transcode_ctx *ctx)
+open_filters(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
 {
-  AVCodecContext *dec_ctx, *enc_ctx;
+  AVCodecContext *dec_ctx;
+  AVCodecContext *enc_ctx;
   const char *filter_spec;
   int i;
   int stream_nb;
   int ret;
 
-  ctx->filter_ctx = av_malloc_array(ctx->ifmt_ctx->nb_streams, sizeof(*ctx->filter_ctx));
+  ctx->filter_ctx = av_malloc_array(src_ctx->ifmt_ctx->nb_streams, sizeof(*ctx->filter_ctx));
   if (!ctx->filter_ctx)
     {
       DPRINTF(E_LOG, L_XCODE, "Out of memory for outputs/inputs\n");
       return -1;
     }
 
-  for (i = 0; i < ctx->ifmt_ctx->nb_streams; i++)
+  for (i = 0; i < src_ctx->ifmt_ctx->nb_streams; i++)
     {
       ctx->filter_ctx[i].buffersrc_ctx  = NULL;
       ctx->filter_ctx[i].buffersink_ctx = NULL;
@@ -833,7 +1030,7 @@ open_filters(struct transcode_ctx *ctx)
       if (stream_nb < 0)
 	continue;
 
-      dec_ctx = ctx->ifmt_ctx->streams[i]->codec;
+      dec_ctx = src_ctx->ifmt_ctx->streams[i]->codec;
       enc_ctx = ctx->ofmt_ctx->streams[stream_nb]->codec;
 
       if (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO)
@@ -851,7 +1048,7 @@ open_filters(struct transcode_ctx *ctx)
   return 0;
 
  out_fail:
-  for (i = 0; i < ctx->ifmt_ctx->nb_streams; i++)
+  for (i = 0; i < src_ctx->ifmt_ctx->nb_streams; i++)
     {
       if (ctx->filter_ctx && ctx->filter_ctx[i].filter_graph)
 	avfilter_graph_free(&ctx->filter_ctx[i].filter_graph);
@@ -862,11 +1059,11 @@ open_filters(struct transcode_ctx *ctx)
 }
 
 static void
-close_filters(struct transcode_ctx *ctx)
+close_filters(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
 {
   int i;
 
-  for (i = 0; i < ctx->ifmt_ctx->nb_streams; i++)
+  for (i = 0; i < src_ctx->ifmt_ctx->nb_streams; i++)
     {
       if (ctx->filter_ctx && ctx->filter_ctx[i].filter_graph)
 	avfilter_graph_free(&ctx->filter_ctx[i].filter_graph);
@@ -874,466 +1071,99 @@ close_filters(struct transcode_ctx *ctx)
   av_free(ctx->filter_ctx);
 }
 
-static int
-encode_write_frame(struct transcode_ctx *ctx, AVFrame *filt_frame, unsigned int stream_index, int *got_frame)
+
+/* ----------------------------- TRANSCODE API ----------------------------- */
+
+/*                                  Setup                                    */
+
+struct decode_ctx *
+transcode_decode_setup(struct media_file_info *mfi, int decode_video)
 {
-  AVStream *out_stream;
-  AVPacket enc_pkt;
-  int ret;
-  int got_frame_local;
-  int stream_nb;
-  int (*enc_func)(AVCodecContext *, AVPacket *, const AVFrame *, int *) =
-        (ctx->ifmt_ctx->streams[stream_index]->codec->codec_type ==
-         AVMEDIA_TYPE_VIDEO) ? avcodec_encode_video2 : avcodec_encode_audio2;
+  struct decode_ctx *ctx;
 
-  if (!got_frame)
-    got_frame = &got_frame_local;
-
-  stream_nb = ctx->stream_map[stream_index];
-  out_stream = ctx->ofmt_ctx->streams[stream_nb];
-
-  // Encode filtered frame
-  enc_pkt.data = NULL;
-  enc_pkt.size = 0;
-  av_init_packet(&enc_pkt);
-  ret = enc_func(out_stream->codec, &enc_pkt, filt_frame, got_frame);
-  if (ret < 0)
-    return -1;
-  if (!(*got_frame))
-    return 0;
-
-  // Prepare packet for muxing
-  enc_pkt.stream_index = stream_nb;
-
-  // This "wonderful" peace of code makes sure that the timestamp never decreases,
-  // even if the user seeked backwards. The muxer will not accept decreasing
-  // timestamps
-  enc_pkt.pts += ctx->offset_pts[stream_nb];
-  if (enc_pkt.pts < ctx->prev_pts[stream_nb])
+  ctx = calloc(1, sizeof(struct decode_ctx));
+  if (!ctx)
     {
-      ctx->offset_pts[stream_nb] += ctx->prev_pts[stream_nb] - enc_pkt.pts;
-      enc_pkt.pts = ctx->prev_pts[stream_nb];
+      DPRINTF(E_LOG, L_XCODE, "Out of memory for decode ctx\n");
+      return NULL;
     }
-  ctx->prev_pts[stream_nb] = enc_pkt.pts;
-  enc_pkt.dts = enc_pkt.pts; //FIXME
 
-  av_packet_rescale_ts(&enc_pkt, out_stream->codec->time_base, out_stream->time_base);
+  if (open_input(ctx, mfi, decode_video) < 0)
+    {
+      free(ctx);
+      return NULL;
+    }
 
-  // Mux encoded frame
-  ret = av_interleaved_write_frame(ctx->ofmt_ctx, &enc_pkt);
-  return ret;
+  ctx->duration = mfi->song_length;
+  ctx->samples = mfi->sample_count;
+
+  return ctx;
 }
 
-#ifdef HAVE_LIBAVFILTER
-static int
-filter_encode_write_frame(struct transcode_ctx *ctx, AVFrame *frame, unsigned int stream_index)
+struct encode_ctx *
+transcode_encode_setup(struct decode_ctx *src_ctx, enum transcode_profile profile, off_t *est_size)
 {
-  AVFrame *filt_frame;
-  int ret;
+  struct encode_ctx *ctx;
 
-  // Push the decoded frame into the filtergraph
-  ret = av_buffersrc_add_frame_flags(ctx->filter_ctx[stream_index].buffersrc_ctx, frame, 0);
-  if (ret < 0)
+  ctx = calloc(1, sizeof(struct encode_ctx));
+  if (!ctx)
     {
-      DPRINTF(E_LOG, L_XCODE, "Error while feeding the filtergraph\n");
-      return -1;
+      DPRINTF(E_LOG, L_XCODE, "Out of memory for encode ctx\n");
+      return NULL;
     }
 
-  // Pull filtered frames from the filtergraph
-  while (1)
+  if ((init_profile(ctx, profile) < 0) || (open_output(ctx, src_ctx) < 0))
     {
-      filt_frame = av_frame_alloc();
-      if (!filt_frame)
-	{
-	  DPRINTF(E_LOG, L_XCODE, "Out of memory for filt_frame\n");
-	  return -1;
-	}
-
-      ret = av_buffersink_get_frame(ctx->filter_ctx[stream_index].buffersink_ctx, filt_frame);
-      if (ret < 0)
-	{
-	  /* if no more frames for output - returns AVERROR(EAGAIN)
-	   * if flushed and no more frames for output - returns AVERROR_EOF
-	   * rewrite retcode to 0 to show it as normal procedure completion
-	   */
-	  if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-	    ret = 0;
-	  av_frame_free(&filt_frame);
-	  break;
-	}
-
-      filt_frame->pict_type = AV_PICTURE_TYPE_NONE;
-      ret = encode_write_frame(ctx, filt_frame, stream_index, NULL);
-      av_frame_free(&filt_frame);
-      if (ret < 0)
-	break;
+      free(ctx);
+      return NULL;
     }
 
-  return ret;
-}
-#else
-static int
-filter_encode_write_frame(struct transcode_ctx *ctx, AVFrame *frame, unsigned int stream_index)
-{
-  AVFilterBufferRef *picref;
-  AVCodecContext *enc_ctx;
-  AVFrame *filt_frame;
-  int stream_nb;
-  int ret;
-
-  stream_nb = ctx->stream_map[stream_index];
-  enc_ctx = ctx->ofmt_ctx->streams[stream_nb]->codec;
-
-  // Push the decoded frame into the filtergraph
-  ret = av_buffersrc_write_frame(ctx->filter_ctx[stream_index].buffersrc_ctx, frame);
-  if (ret < 0)
+  if (open_filters(ctx, src_ctx) < 0)
     {
-      DPRINTF(E_LOG, L_XCODE, "Error while feeding the filtergraph\n");
-      return -1;
+      close_output(ctx);
+      free(ctx);
+      return NULL;
     }
 
-  // Pull filtered frames from the filtergraph
-  while (1)
+  ctx->icy_interval = METADATA_ICY_INTERVAL * ctx->out_channels * ctx->out_byte_depth * ctx->out_sample_rate;
+
+  if (profile == XCODE_PCM16_HEADER)
     {
-      filt_frame = av_frame_alloc();
-      if (!filt_frame)
-	{
-	  DPRINTF(E_LOG, L_XCODE, "Out of memory for filt_frame\n");
-	  return -1;
-	}
-
-      if (enc_ctx->codec_type == AVMEDIA_TYPE_AUDIO && !(enc_ctx->codec->capabilities & CODEC_CAP_VARIABLE_FRAME_SIZE))
-	ret = av_buffersink_read_samples(ctx->filter_ctx[stream_index].buffersink_ctx, &picref, enc_ctx->frame_size);
-      else
-	ret = av_buffersink_read(ctx->filter_ctx[stream_index].buffersink_ctx, &picref);
-
-      if (ret < 0)
-	{
-	  /* if no more frames for output - returns AVERROR(EAGAIN)
-	   * if flushed and no more frames for output - returns AVERROR_EOF
-	   * rewrite retcode to 0 to show it as normal procedure completion
-	   */
-	  if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-	    ret = 0;
-	  av_frame_free(&filt_frame);
-	  break;
-	}
-
-      avfilter_copy_buf_props(filt_frame, picref);
-      ret = encode_write_frame(ctx, filt_frame, stream_index, NULL);
-      av_frame_free(&filt_frame);
-      avfilter_unref_buffer(picref);
-      if (ret < 0)
-	break;
+      ctx->wavhdr = 1;
+      make_wav_header(ctx, src_ctx, est_size);
     }
 
-  return ret;
-}
-#endif
-
-static void
-flush_encoder(struct transcode_ctx *ctx, unsigned int stream_index)
-{
-  int stream_nb;
-  int ret;
-  int got_frame;
-
-  stream_nb = ctx->stream_map[stream_index];
-  if (stream_nb < 0)
-    return;
-
-  DPRINTF(E_DBG, L_XCODE, "Flushing output stream #%u encoder\n", stream_nb);
-
-  if (!(ctx->ofmt_ctx->streams[stream_nb]->codec->codec->capabilities & CODEC_CAP_DELAY))
-    return;
-
-  do
-    {
-      ret = encode_write_frame(ctx, NULL, stream_index, &got_frame);
-    }
-  while ((ret == 0) && got_frame);
+  return ctx;
 }
 
 struct transcode_ctx *
-transcode_setup(enum transcode_profile profile, struct media_file_info *mfi, off_t *est_size)
+transcode_setup(struct media_file_info *mfi, enum transcode_profile profile, off_t *est_size)
 {
   struct transcode_ctx *ctx;
 
   ctx = malloc(sizeof(struct transcode_ctx));
   if (!ctx)
     {
-      DPRINTF(E_LOG, L_XCODE, "Out of memory for filt_frame\n");
-      goto out_fail_ctx;
+      DPRINTF(E_LOG, L_XCODE, "Out of memory for transcode ctx\n");
+      return NULL;
     }
-  memset(ctx, 0, sizeof(struct transcode_ctx));
 
-  if (init_profile(ctx, profile) < 0)
-    goto out_fail_profile;
-  if (open_input(ctx, mfi) < 0)
-    goto out_fail_input;
-  if (open_output(ctx) < 0)
-    goto out_fail_output;
-  if (open_filters(ctx) < 0)
-    goto out_fail_filter;
-
-  ctx->duration = mfi->song_length;
-  ctx->samples = mfi->sample_count;
-  ctx->icy_interval = METADATA_ICY_INTERVAL * ctx->out_channels * ctx->out_byte_depth * ctx->out_sample_rate;
-
-  if (profile == XCODE_PCM16_HEADER)
+  ctx->decode_ctx = transcode_decode_setup(mfi, profile & XCODE_HAS_VIDEO);
+  if (!ctx->decode_ctx)
     {
-      ctx->wavhdr = 1;
-      make_wav_header(ctx, est_size);
+      free(ctx);
+      return NULL;
+    }
+
+  ctx->encode_ctx = transcode_encode_setup(ctx->decode_ctx, profile, est_size);
+  if (!ctx->encode_ctx)
+    {
+      transcode_decode_cleanup(ctx->decode_ctx);
+      free(ctx);
+      return NULL;
     }
 
   return ctx;
-
- out_fail_filter:
-  close_output(ctx);
- out_fail_output:
-  close_input(ctx);
- out_fail_input:
- out_fail_profile:
-  free(ctx);
- out_fail_ctx:
-
-  return NULL;
-}
-
-int
-transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *icy_timer)
-{
-  AVPacket packet = { .data = NULL, .size = 0 };
-  AVStream *in_stream, *out_stream;
-  AVFrame *frame = NULL;
-  char errbuf[128];
-  int stream_nb;
-  int processed;
-  int got_frame;
-  int retry;
-  int ret;
-
-  if (ctx->wavhdr && (ctx->offset == 0))
-    {
-      evbuffer_add(evbuf, ctx->header, sizeof(ctx->header));
-      processed += sizeof(ctx->header);
-      ctx->offset += sizeof(ctx->header);
-    }
-
-  ret = 0;
-  retry = 0;
-  processed = 0;
-  while (processed < wanted)
-    {
-      if (ctx->resume)
-	{
-          av_copy_packet(&packet, &ctx->seek_packet);
-	  ctx->resume = 0;
-	}
-      else if ((ret = av_read_frame(ctx->ifmt_ctx, &packet)) < 0)
-	break;
-
-      stream_nb = ctx->stream_map[packet.stream_index];
-      if (stream_nb < 0)
-	{
-	  av_free_packet(&packet);
-	  continue;
-	}
-
-      in_stream = ctx->ifmt_ctx->streams[packet.stream_index];
-      out_stream = ctx->ofmt_ctx->streams[stream_nb];
-
-      if (ctx->filter_ctx[packet.stream_index].filter_graph)
-	{
-	  frame = av_frame_alloc();
-	  if (!frame)
-	    {
-	      ret = AVERROR(ENOMEM);
-	      break;
-	    }
-
-	  av_packet_rescale_ts(&packet, in_stream->time_base, in_stream->codec->time_base);
-
-	  if (in_stream->codec->codec_type == AVMEDIA_TYPE_AUDIO)
-	    ret = avcodec_decode_audio4(in_stream->codec, frame, &got_frame, &packet);
-	  else
-	    ret = avcodec_decode_video2(in_stream->codec, frame, &got_frame, &packet);
-
-	  if (ret >= 0)
-	    retry = 0;
-	  else if (!retry)
-	    {
-	      av_frame_free(&frame);
-	      av_free_packet(&packet);
-
-	      DPRINTF(E_WARN, L_XCODE, "Couldn't decode packet, let's try the next one\n");
-	      retry = 1;
-	      continue;
-	    }
-	  else
-	    {
-	      av_frame_free(&frame);
-
-	      DPRINTF(E_LOG, L_XCODE, "Couldn't decode packet after two attempts, giving up\n");
-	      break;
-	    }
-
-	  if (got_frame)
-	    {
-	      frame->pts = av_frame_get_best_effort_timestamp(frame);
-	      ret = filter_encode_write_frame(ctx, frame, packet.stream_index);
-	      av_frame_free(&frame);
-	      if (ret < 0)
-		goto end;
-	    }
-	  else
-	    av_frame_free(&frame);
-	}
-      else
-	{
-	  /* remux this frame without reencoding */
-	  av_packet_rescale_ts(&packet, in_stream->time_base, out_stream->time_base);
-
-	  ret = av_interleaved_write_frame(ctx->ofmt_ctx, &packet);
-	  if (ret < 0)
-	    goto end;
-	}
-
-      av_free_packet(&packet);
-
-      processed += evbuffer_get_length(ctx->obuf);
-
-      evbuffer_add_buffer(evbuf, ctx->obuf);
-    }
-
-  ctx->offset += processed;
-  *icy_timer = (ctx->offset % ctx->icy_interval < processed);
-
-  av_free_packet(&packet);
-  av_frame_free(&frame);
-
-end:
-  if (ret < 0)
-    {
-      av_strerror(ret, errbuf, sizeof(errbuf));
-      DPRINTF(E_LOG, L_XCODE, "Error occurred: %s\n", errbuf);
-    }
-  else
-    ret = processed;
-
-  return ret;
-}
-
-void
-transcode_cleanup(struct transcode_ctx *ctx)
-{
-  int i;
-
-  // Flush filters and encoders
-  for (i = 0; i < ctx->ifmt_ctx->nb_streams; i++)
-    {
-      if (ctx->stream_map[i] < 0)
-	continue;
-      if (!ctx->filter_ctx[i].filter_graph)
-	continue;
-      filter_encode_write_frame(ctx, NULL, i);
-      flush_encoder(ctx, i);
-    }
-
-  av_write_trailer(ctx->ofmt_ctx);
-
-  close_filters(ctx);
-  close_output(ctx);
-  close_input(ctx);
-
-  free(ctx);
-}
-
-int
-transcode_seek(struct transcode_ctx *ctx, int ms)
-{
-  int64_t start_time;
-  int64_t target_pts;
-  int64_t got_pts;
-  int stream_nb;
-  int got_ms;
-  int flags;
-  int ret;
-  int i;
-
-  start_time = ctx->audio_stream->start_time;
-
-  target_pts = ms;
-  target_pts = target_pts * AV_TIME_BASE / 1000;
-  target_pts = av_rescale_q(target_pts, AV_TIME_BASE_Q, ctx->audio_stream->time_base);
-
-  if ((start_time != AV_NOPTS_VALUE) && (start_time > 0))
-    target_pts += start_time;
-
-  ret = av_seek_frame(ctx->ifmt_ctx, ctx->audio_stream->index, target_pts, AVSEEK_FLAG_BACKWARD);
-  if (ret < 0)
-    {
-      DPRINTF(E_WARN, L_XCODE, "Could not seek into stream: %s\n", strerror(AVUNERROR(ret)));
-
-      return -1;
-    }
-
-  for (i = 0; i < ctx->ifmt_ctx->nb_streams; i++)
-    {
-      stream_nb = ctx->stream_map[i];
-      if (stream_nb < 0)
-	continue;
-
-      avcodec_flush_buffers(ctx->ifmt_ctx->streams[i]->codec);
-      avcodec_flush_buffers(ctx->ofmt_ctx->streams[stream_nb]->codec);
-    }
-
-  // Fast forward until first packet with a timestamp is found
-  ctx->audio_stream->codec->skip_frame = AVDISCARD_NONREF;
-  flags = 0;
-  while (1)
-    {
-      av_free_packet(&ctx->seek_packet);
-
-      ret = av_read_frame(ctx->ifmt_ctx, &ctx->seek_packet);
-      if (ret < 0)
-	{
-	  DPRINTF(E_WARN, L_XCODE, "Could not read more data while seeking\n");
-
-	  flags = 1;
-	  break;
-	}
-
-      if (ctx->seek_packet.stream_index != ctx->audio_stream->index)
-	continue;
-
-      // Need a pts to return the real position
-      if (ctx->seek_packet.pts == AV_NOPTS_VALUE)
-	continue;
-
-      break;
-    }
-  ctx->audio_stream->codec->skip_frame = AVDISCARD_DEFAULT;
-
-  // Error while reading frame above
-  if (flags)
-    return -1;
-
-  // Tell transcode() to resume with seek_packet
-  ctx->resume = 1;
-
-  // Compute position in ms from pts
-  got_pts = ctx->seek_packet.pts;
-
-  if ((start_time != AV_NOPTS_VALUE) && (start_time > 0))
-    got_pts -= start_time;
-
-  got_pts = av_rescale_q(got_pts, ctx->audio_stream->time_base, AV_TIME_BASE_Q);
-  got_ms = got_pts / (AV_TIME_BASE / 1000);
-
-  DPRINTF(E_DBG, L_XCODE, "Seek wanted %d ms, got %d ms\n", ms, got_ms);
-
-  return got_ms;
 }
 
 int
@@ -1417,21 +1247,312 @@ transcode_needed(const char *user_agent, const char *client_codecs, char *file_c
   return 1;
 }
 
+
+/*                                  Cleanup                                  */
+
+void
+transcode_decode_cleanup(struct decode_ctx *ctx)
+{
+  close_input(ctx);
+  free(ctx);
+}
+
+void
+transcode_encode_cleanup(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
+{
+  int i;
+
+  // Flush filters and encoders
+  for (i = 0; i < src_ctx->ifmt_ctx->nb_streams; i++)
+    {
+      if (ctx->stream_map[i] < 0)
+	continue;
+      if (!ctx->filter_ctx[i].filter_graph)
+	continue;
+      filter_encode_write_frame(ctx, NULL, i);
+      flush_encoder(ctx, i);
+    }
+
+  av_write_trailer(ctx->ofmt_ctx);
+
+  close_filters(ctx, src_ctx);
+  close_output(ctx);
+  free(ctx);
+}
+
+void
+transcode_cleanup(struct transcode_ctx *ctx)
+{
+  transcode_encode_cleanup(ctx->encode_ctx, ctx->decode_ctx);
+  transcode_decode_cleanup(ctx->decode_ctx);
+  free(ctx);
+}
+
+void
+transcode_decoded_free(struct decoded_packet *decoded)
+{
+  av_frame_free(&decoded->frame);
+  free(decoded);
+}
+
+
+/*                       Encoding, decoding and transcoding                  */
+
+struct decoded_packet *
+transcode_decode(struct decode_ctx *ctx)
+{
+  struct decoded_packet *decoded;
+  AVPacket packet;
+  AVStream *in_stream;
+  AVFrame *frame;
+  unsigned int stream_index;
+  int got_frame;
+  int ret;
+
+  while (1)
+    {
+      if (ctx->resume)
+	{
+	  av_copy_packet(&packet, &ctx->seek_packet);
+	  ctx->resume = 0;
+        }
+      else if ((ret = av_read_frame(ctx->ifmt_ctx, &packet)) < 0)
+        return NULL;
+
+      stream_index = packet.stream_index;
+      in_stream = ctx->ifmt_ctx->streams[stream_index];
+      if (decode_stream(ctx, in_stream))
+	break;
+
+      av_free_packet(&packet);
+    }
+
+  frame = av_frame_alloc();
+  if (!frame)
+    {
+      DPRINTF(E_LOG, L_XCODE, "Out of memory for decode frame\n");
+      av_free_packet(&packet);
+      return NULL;
+    }
+
+  av_packet_rescale_ts(&packet, in_stream->time_base, in_stream->codec->time_base);
+
+  if (in_stream->codec->codec_type == AVMEDIA_TYPE_AUDIO)
+    ret = avcodec_decode_audio4(in_stream->codec, frame, &got_frame, &packet);
+  else
+    ret = avcodec_decode_video2(in_stream->codec, frame, &got_frame, &packet);
+
+  av_free_packet(&packet);
+
+  if (!got_frame || (ret < 0))
+    {
+      av_frame_free(&frame);
+
+      if (ctx->retry)
+	{
+	  DPRINTF(E_LOG, L_XCODE, "Couldn't decode packet after two attempts, giving up\n");
+	  return NULL;
+	}
+      else
+	{
+	  DPRINTF(E_WARN, L_XCODE, "Couldn't decode packet, let's try the next one\n");
+	  ctx->retry = 1;
+	  decoded = transcode_decode(ctx);
+	  if (!decoded)
+	    return NULL;
+
+	  frame = decoded->frame;
+	  stream_index = decoded->stream_index;
+	  free(decoded);
+	}
+    }
+
+  frame->pts = av_frame_get_best_effort_timestamp(frame);
+
+  decoded = malloc(sizeof(struct decoded_packet));
+  if (!decoded)
+    {
+      DPRINTF(E_LOG, L_XCODE, "Out of memory for decoded result\n");
+      return NULL;
+    }
+
+  decoded->frame = frame;
+  decoded->stream_index = stream_index;
+
+  return decoded;
+}
+
+// Filters and encodes
+int
+transcode_encode(struct evbuffer *evbuf, struct decoded_packet *decoded, struct encode_ctx *ctx)
+{
+  char errbuf[128];
+  int encoded_length;
+  int ret;
+
+  encoded_length = 0;
+
+  if (ctx->wavhdr)
+    {
+      encoded_length += sizeof(ctx->header);
+      evbuffer_add(evbuf, ctx->header, sizeof(ctx->header));
+      ctx->wavhdr = 0;
+    }
+
+  ret = filter_encode_write_frame(ctx, decoded->frame, decoded->stream_index);
+  if (ret < 0)
+    {
+      av_strerror(ret, errbuf, sizeof(errbuf));
+      DPRINTF(E_LOG, L_XCODE, "Error occurred: %s\n", errbuf);
+      return ret;
+    }
+
+  encoded_length += evbuffer_get_length(ctx->obuf);
+  evbuffer_add_buffer(evbuf, ctx->obuf);
+
+  return encoded_length;
+}
+
+int
+transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *icy_timer)
+{
+  struct decoded_packet *decoded;
+  int processed;
+  int ret;
+
+  processed = 0;
+  while (processed < wanted)
+    {
+      decoded = transcode_decode(ctx->decode_ctx);
+      if (!decoded)
+	return -1;
+
+      ret = transcode_encode(evbuf, decoded, ctx->encode_ctx);
+      transcode_decoded_free(decoded);
+      if (ret < 0)
+	return -1;
+
+      processed += ret;
+    }
+
+  ctx->encode_ctx->total_bytes += processed;
+  *icy_timer = (ctx->encode_ctx->total_bytes % ctx->encode_ctx->icy_interval < processed);
+
+  return processed;
+}
+/* TODO remux this frame without reencoding
+	  av_packet_rescale_ts(&packet, in_stream->time_base, out_stream->time_base);
+
+	  ret = av_interleaved_write_frame(ctx->ofmt_ctx, &packet);
+	  if (ret < 0)
+	    goto end;*/
+
+
+/*                                  Seeking                                  */
+
+int
+transcode_seek(struct transcode_ctx *ctx, int ms)
+{
+  struct decode_ctx *decode_ctx;
+  AVStream *in_stream;
+  int64_t start_time;
+  int64_t target_pts;
+  int64_t got_pts;
+  int got_ms;
+  int flags;
+  int ret;
+  int i;
+
+  decode_ctx = ctx->decode_ctx;
+  in_stream = ctx->decode_ctx->audio_stream;
+  start_time = in_stream->start_time;
+
+  target_pts = ms;
+  target_pts = target_pts * AV_TIME_BASE / 1000;
+  target_pts = av_rescale_q(target_pts, AV_TIME_BASE_Q, in_stream->time_base);
+
+  if ((start_time != AV_NOPTS_VALUE) && (start_time > 0))
+    target_pts += start_time;
+
+  ret = av_seek_frame(decode_ctx->ifmt_ctx, in_stream->index, target_pts, AVSEEK_FLAG_BACKWARD);
+  if (ret < 0)
+    {
+      DPRINTF(E_WARN, L_XCODE, "Could not seek into stream: %s\n", strerror(AVUNERROR(ret)));
+      return -1;
+    }
+
+  for (i = 0; i < decode_ctx->ifmt_ctx->nb_streams; i++)
+    {
+      if (decode_stream(decode_ctx, decode_ctx->ifmt_ctx->streams[i]))
+	avcodec_flush_buffers(decode_ctx->ifmt_ctx->streams[i]->codec);
+//      avcodec_flush_buffers(ctx->ofmt_ctx->streams[stream_nb]->codec);
+    }
+
+  // Fast forward until first packet with a timestamp is found
+  in_stream->codec->skip_frame = AVDISCARD_NONREF;
+  flags = 0;
+  while (1)
+    {
+      av_free_packet(&decode_ctx->seek_packet);
+
+      ret = av_read_frame(decode_ctx->ifmt_ctx, &decode_ctx->seek_packet);
+      if (ret < 0)
+	{
+	  DPRINTF(E_WARN, L_XCODE, "Could not read more data while seeking\n");
+	  flags = 1;
+	  break;
+	}
+
+      if (decode_ctx->seek_packet.stream_index != in_stream->index)
+	continue;
+
+      // Need a pts to return the real position
+      if (decode_ctx->seek_packet.pts == AV_NOPTS_VALUE)
+	continue;
+
+      break;
+    }
+  in_stream->codec->skip_frame = AVDISCARD_DEFAULT;
+
+  // Error while reading frame above
+  if (flags)
+    return -1;
+
+  // Tell transcode() to resume with seek_packet
+  decode_ctx->resume = 1;
+
+  // Compute position in ms from pts
+  got_pts = decode_ctx->seek_packet.pts;
+
+  if ((start_time != AV_NOPTS_VALUE) && (start_time > 0))
+    got_pts -= start_time;
+
+  got_pts = av_rescale_q(got_pts, in_stream->time_base, AV_TIME_BASE_Q);
+  got_ms = got_pts / (AV_TIME_BASE / 1000);
+
+  DPRINTF(E_DBG, L_XCODE, "Seek wanted %d ms, got %d ms\n", ms, got_ms);
+
+  return got_ms;
+}
+
+
+/*                                  Metadata                                 */
+
 struct http_icy_metadata *
 transcode_metadata(struct transcode_ctx *ctx, int *changed)
 {
   struct http_icy_metadata *m;
 
-  if (!ctx->ifmt_ctx)
+  if (!ctx->decode_ctx->ifmt_ctx)
     return NULL;
 
-  m = http_icy_metadata_get(ctx->ifmt_ctx, 1);
+  m = http_icy_metadata_get(ctx->decode_ctx->ifmt_ctx, 1);
   if (!m)
     return NULL;
 
-  *changed = (m->hash != ctx->icy_hash);
+  *changed = (m->hash != ctx->encode_ctx->icy_hash);
 
-  ctx->icy_hash = m->hash;
+  ctx->encode_ctx->icy_hash = m->hash;
 
   return m;
 }
@@ -1442,12 +1563,12 @@ transcode_metadata_artwork_url(struct transcode_ctx *ctx)
   struct http_icy_metadata *m;
   char *artwork_url;
 
-  if (!ctx->ifmt_ctx || !ctx->ifmt_ctx->filename)
+  if (!ctx->decode_ctx->ifmt_ctx || !ctx->decode_ctx->ifmt_ctx->filename)
     return NULL;
 
   artwork_url = NULL;
 
-  m = http_icy_metadata_get(ctx->ifmt_ctx, 1);
+  m = http_icy_metadata_get(ctx->decode_ctx->ifmt_ctx, 1);
   if (m && m->artwork_url)
     artwork_url = strdup(m->artwork_url);
 

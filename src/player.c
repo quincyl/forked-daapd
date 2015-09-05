@@ -1403,7 +1403,7 @@ source_open(struct player_source *ps, int no_md)
 	free(mfi->path);
 	mfi->path = url;
 
-	ps->xcode = transcode_setup(XCODE_PCM16_NOHEADER, mfi, NULL);
+	ps->xcode = transcode_setup(mfi, XCODE_PCM16_NOHEADER, NULL);
 	ret = ps->xcode ? 0 : -1;
 	break;
 
@@ -1423,7 +1423,7 @@ source_open(struct player_source *ps, int no_md)
 
       default:
 	ps->type = SOURCE_FILE;
-	ps->xcode = transcode_setup(XCODE_PCM16_NOHEADER, mfi, NULL);
+	ps->xcode = transcode_setup(mfi, XCODE_PCM16_NOHEADER, NULL);
 	ret = ps->xcode ? 0 : -1;
     }
 
