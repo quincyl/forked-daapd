@@ -53,8 +53,6 @@ static char *default_codecs = "mpeg,wav";
 static char *roku_codecs = "mpeg,mp4a,wma,wav";
 static char *itunes_codecs = "mpeg,mp4a,mp4v,alac,wav";
 
-static char errbuf[128];
-
 struct filter_ctx {
   AVFilterContext *buffersink_ctx;
   AVFilterContext *buffersrc_ctx;
@@ -1307,6 +1305,7 @@ transcode_decode(struct decode_ctx *ctx)
   AVPacket packet;
   AVStream *in_stream;
   AVFrame *frame;
+  char *errmsg;
   unsigned int stream_index;
   int got_frame;
   int ret;
@@ -1325,8 +1324,10 @@ transcode_decode(struct decode_ctx *ctx)
         }
       else if ((ret = av_read_frame(ctx->ifmt_ctx, &packet)) < 0)
 	{
-	  av_strerror(ret, errbuf, sizeof(errbuf));
-	  DPRINTF(E_LOG, L_XCODE, "Error trying to read frame: %s\n", errbuf);
+	  errmsg = malloc(128);
+	  av_strerror(ret, errmsg, 128);
+	  DPRINTF(E_LOG, L_XCODE, "Error trying to read frame: %s\n", errmsg);
+	  free(errmsg);
           return NULL;
 	}
 
@@ -1401,6 +1402,7 @@ transcode_decode(struct decode_ctx *ctx)
 int
 transcode_encode(struct evbuffer *evbuf, struct decoded_packet *decoded, struct encode_ctx *ctx)
 {
+  char *errmsg;
   int encoded_length;
   int ret;
 
@@ -1416,8 +1418,10 @@ transcode_encode(struct evbuffer *evbuf, struct decoded_packet *decoded, struct 
   ret = filter_encode_write_frame(ctx, decoded->frame, decoded->stream_index);
   if (ret < 0)
     {
-      av_strerror(ret, errbuf, sizeof(errbuf));
-      DPRINTF(E_LOG, L_XCODE, "Error occurred: %s\n", errbuf);
+      errmsg = malloc(128);
+      av_strerror(ret, errmsg, 128);
+      DPRINTF(E_LOG, L_XCODE, "Error occurred: %s\n", errmsg);
+      free(errmsg);
       return ret;
     }
 
