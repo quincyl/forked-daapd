@@ -234,12 +234,15 @@ static uint64_t last_rtptime;
 static int dev_autoselect;
 static struct raop_device *dev_list;
 
-/* Device status */
+/* Output status */
 static enum laudio_state laudio_status;
 static int laudio_selected;
 static int laudio_volume;
 static int laudio_relvol;
 static int raop_sessions;
+static int icecast_selected;
+
+static player_icecast_cb icecast_write;
 
 /* Commands */
 static struct player_command *cur_cmd;
@@ -1951,6 +1954,9 @@ playback_write(void)
       playback_abort();
       return;
     }
+
+  if (icecast_selected)
+    icecast_write(rawbuf, sizeof(rawbuf));
 
   if (laudio_status & LAUDIO_F_STARTED)
     laudio_write(rawbuf, last_rtptime);
@@ -4562,6 +4568,20 @@ player_playback_prev(void)
 
   return ret;
 }
+
+void
+player_icecast_start(player_icecast_cb cb)
+{
+  icecast_write = cb;
+  icecast_selected = 1;
+}
+
+void
+player_icecast_stop(void)
+{
+  icecast_selected = 0;
+}
+
 
 void
 player_speaker_enumerate(spk_enum_cb cb, void *arg)

@@ -1289,7 +1289,7 @@ transcode_cleanup(struct transcode_ctx *ctx)
 }
 
 void
-transcode_decoded_free(struct decoded_packet *decoded)
+transcode_decoded_free(struct decoded_frame *decoded)
 {
   av_frame_free(&decoded->frame);
   free(decoded);
@@ -1298,7 +1298,7 @@ transcode_decoded_free(struct decoded_packet *decoded)
 
 /*                       Encoding, decoding and transcoding                  */
 
-struct decoded_packet *
+struct decoded_frame *
 transcode_decode(struct decode_ctx *ctx)
 {
   struct decoded_packet *decoded;
@@ -1400,7 +1400,7 @@ transcode_decode(struct decode_ctx *ctx)
 
 // Filters and encodes
 int
-transcode_encode(struct evbuffer *evbuf, struct decoded_packet *decoded, struct encode_ctx *ctx)
+transcode_encode(struct evbuffer *evbuf, struct decoded_frame *decoded, struct encode_ctx *ctx)
 {
   char *errmsg;
   int encoded_length;
@@ -1434,7 +1434,7 @@ transcode_encode(struct evbuffer *evbuf, struct decoded_packet *decoded, struct 
 int
 transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *icy_timer)
 {
-  struct decoded_packet *decoded;
+  struct decoded_frame *decoded;
   int processed;
   int ret;
 
@@ -1458,6 +1458,13 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
 
   return processed;
 }
+
+struct decoded_frame *
+transcode_raw2frame(uint8_t *rawbuf, size_t size)
+{
+  return NULL;
+}
+
 /* TODO remux this frame without reencoding
 	  av_packet_rescale_ts(&packet, in_stream->time_base, out_stream->time_base);
 

@@ -27,7 +27,7 @@ enum transcode_profile
 struct decode_ctx;
 struct encode_ctx;
 struct transcode_ctx;
-struct decoded_packet;
+struct decoded_frame;
 
 // Setting up
 struct decode_ctx *
@@ -53,17 +53,20 @@ void
 transcode_cleanup(struct transcode_ctx *ctx);
 
 void
-transcode_decoded_free(struct decoded_packet *decoded);
+transcode_decoded_free(struct decoded_frame *decoded);
 
 // Transcoding
-struct decoded_packet *
+struct decoded_frame *
 transcode_decode(struct decode_ctx *ctx);
 
 int
-transcode_encode(struct evbuffer *evbuf, struct decoded_packet *decoded, struct encode_ctx *ctx);
+transcode_encode(struct evbuffer *evbuf, struct decoded_frame *decoded, struct encode_ctx *ctx);
 
 int
 transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *icy_timer);
+
+struct decoded_frame *
+transcode_raw2frame(uint8_t *rawbuf, size_t size);
 
 // Seeking
 int

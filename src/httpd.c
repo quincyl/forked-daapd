@@ -126,7 +126,7 @@ static pthread_t tid_httpd;
 struct stream_ctx *g_st;
 #endif
 
-//#include "icecast.c"
+#include "httpd_icecast.c"
 
 static void
 stream_end(struct stream_ctx *st, int failed)
@@ -1038,13 +1038,13 @@ httpd_gen_cb(struct evhttp_request *req, void *arg)
 
       goto out;
     }
-/*  else if (icecast_is_request(req, uri))
+  else if (icecast_is_request(req, uri))
     {
       icecast_request(req);
 
       goto out;
     }
-*/
+
   DPRINTF(E_DBG, L_HTTPD, "HTTP request: %s\n", uri);
 
   /* Serve web interface files */
@@ -1319,6 +1319,14 @@ httpd_init(void)
       goto dacp_fail;
     }
 
+  ret = icecast_init();
+  if (ret < 0)
+    {
+      DPRINTF(E_FATAL, L_HTTPD, "ICECAST init failed\n");
+
+      goto icecast_fail;
+    }
+
 #ifdef USE_EVENTFD
   exit_efd = eventfd(0, EFD_CLOEXEC);
   if (exit_efd < 0)
@@ -1395,6 +1403,8 @@ httpd_init(void)
   close(exit_pipe[1]);
 #endif
  pipe_fail:
+  icecast_deinit();
+ icecast_fail:
   dacp_deinit();
  dacp_fail:
   daap_deinit();
@@ -1440,6 +1450,7 @@ httpd_deinit(void)
       return;
     }
 
+  icecast_deinit();
   rsp_deinit();
   dacp_deinit();
   daap_deinit();
