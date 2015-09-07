@@ -90,31 +90,34 @@ struct encode_ctx {
   // The ffmpeg muxer writes to this buffer using the avio_evbuffer interface
   struct evbuffer *obuf;
 
-  // Array mapping the input stream numbers that we decode to the output stream
-  // numbers that we encode. So if we are decoding audio stream 3 and encoding it
-  // to 0, then stream_map[3] is 0. A value of -1 means the stream is ignored.
-  int stream_map[MAX_STREAMS];
+  // Maps input stream number -> output stream number
+  // So if we are decoding audio stream 3 and encoding it to 0, then
+  // out_stream_map[3] is 0. A value of -1 means the stream is ignored.
+  int out_stream_map[MAX_STREAMS];
+
+  // Maps output stream number -> input stream number
+  unsigned int in_stream_map[MAX_STREAMS];
 
   // Used for seeking
   int64_t prev_pts[MAX_STREAMS];
   int64_t offset_pts[MAX_STREAMS];
 
   // Settings for encoding and muxing
-  const char *out_format;
+  const char *format;
   int encode_video;
 
   // Audio settings
-  enum AVCodecID out_audio_codec;
-  int out_sample_rate;
-  uint64_t out_channel_layout;
-  int out_channels;
-  enum AVSampleFormat out_sample_format;
-  int out_byte_depth;
+  enum AVCodecID audio_codec;
+  int sample_rate;
+  uint64_t channel_layout;
+  int channels;
+  enum AVSampleFormat sample_format;
+  int byte_depth;
 
   // Video settings
-  enum AVCodecID out_video_codec;
-  int out_video_height;
-  int out_video_width;
+  enum AVCodecID video_codec;
+  int video_height;
+  int video_width;
 
   // How many output bytes we have processed in total
   off_t total_bytes;
@@ -133,7 +136,7 @@ struct transcode_ctx {
   struct encode_ctx *encode_ctx;
 };
 
-struct decoded_packet
+struct decoded_frame
 {
   AVFrame *frame;
   unsigned int stream_index;
@@ -150,24 +153,24 @@ init_profile(struct encode_ctx *ctx, enum transcode_profile profile)
       case XCODE_PCM16_NOHEADER:
       case XCODE_PCM16_HEADER:
         ctx->encode_video = 0;
-	ctx->out_format = "s16le";
-	ctx->out_audio_codec = AV_CODEC_ID_PCM_S16LE;
-	ctx->out_sample_rate = 44100;
-	ctx->out_channel_layout = AV_CH_LAYOUT_STEREO;
-	ctx->out_channels = 2;
-	ctx->out_sample_format = AV_SAMPLE_FMT_S16;
-	ctx->out_byte_depth = 2; // Bytes per sample = 16/8
+	ctx->format = "s16le";
+	ctx->audio_codec = AV_CODEC_ID_PCM_S16LE;
+	ctx->sample_rate = 44100;
+	ctx->channel_layout = AV_CH_LAYOUT_STEREO;
+	ctx->channels = 2;
+	ctx->sample_format = AV_SAMPLE_FMT_S16;
+	ctx->byte_depth = 2; // Bytes per sample = 16/8
 	return 0;
 
       case XCODE_MP3:
         ctx->encode_video = 0;
-	ctx->out_format = "mp3";
-	ctx->out_audio_codec = AV_CODEC_ID_MP3;
-	ctx->out_sample_rate = 44100;
-	ctx->out_channel_layout = AV_CH_LAYOUT_STEREO;
-	ctx->out_channels = 2;
-	ctx->out_sample_format = AV_SAMPLE_FMT_S16P;
-	ctx->out_byte_depth = 2; // Bytes per sample = 16/8
+	ctx->format = "mp3";
+	ctx->audio_codec = AV_CODEC_ID_MP3;
+	ctx->sample_rate = 44100;
+	ctx->channel_layout = AV_CH_LAYOUT_STEREO;
+	ctx->channels = 2;
+	ctx->sample_format = AV_SAMPLE_FMT_S16P;
+	ctx->byte_depth = 2; // Bytes per sample = 16/8
 	return 0;
 
       case XCODE_H264_AAC:
@@ -211,14 +214,14 @@ make_wav_header(struct encode_ctx *ctx, struct decode_ctx *src_ctx, off_t *est_s
   else
     duration = 3 * 60 * 1000; /* 3 minutes, in ms */
 
-  need_resample = (src_ctx->audio_stream->codec->sample_fmt != ctx->out_sample_format)
-                   || (src_ctx->audio_stream->codec->channels != ctx->out_channels)
-                   || (src_ctx->audio_stream->codec->sample_rate != ctx->out_sample_rate);
+  need_resample = (src_ctx->audio_stream->codec->sample_fmt != ctx->sample_format)
+                   || (src_ctx->audio_stream->codec->channels != ctx->channels)
+                   || (src_ctx->audio_stream->codec->sample_rate != ctx->sample_rate);
 
   if (src_ctx->samples && !need_resample)
-    wav_len = ctx->out_channels * ctx->out_byte_depth * src_ctx->samples;
+    wav_len = ctx->channels * ctx->byte_depth * src_ctx->samples;
   else
-    wav_len = ctx->out_channels * ctx->out_byte_depth * ctx->out_sample_rate * (duration / 1000);
+    wav_len = ctx->channels * ctx->byte_depth * ctx->sample_rate * (duration / 1000);
 
   *est_size = wav_len + sizeof(ctx->header);
 
@@ -227,11 +230,11 @@ make_wav_header(struct encode_ctx *ctx, struct decode_ctx *src_ctx, off_t *est_s
   memcpy(ctx->header + 8, "WAVEfmt ", 8);
   add_le32(ctx->header + 16, 16);
   add_le16(ctx->header + 20, 1);
-  add_le16(ctx->header + 22, ctx->out_channels);     /* channels */
-  add_le32(ctx->header + 24, ctx->out_sample_rate);  /* samplerate */
-  add_le32(ctx->header + 28, ctx->out_sample_rate * ctx->out_channels * ctx->out_byte_depth); /* byte rate */
-  add_le16(ctx->header + 32, ctx->out_channels * ctx->out_byte_depth);                        /* block align */
-  add_le16(ctx->header + 34, ctx->out_byte_depth * 8);                                        /* bits per sample */
+  add_le16(ctx->header + 22, ctx->channels);     /* channels */
+  add_le32(ctx->header + 24, ctx->sample_rate);  /* samplerate */
+  add_le32(ctx->header + 28, ctx->sample_rate * ctx->channels * ctx->byte_depth); /* byte rate */
+  add_le16(ctx->header + 32, ctx->channels * ctx->byte_depth);                        /* block align */
+  add_le16(ctx->header + 34, ctx->byte_depth * 8);                                        /* bits per sample */
   memcpy(ctx->header + 36, "data", 4);
   add_le32(ctx->header + 40, wav_len);
 }
@@ -251,13 +254,11 @@ encode_write_frame(struct encode_ctx *ctx, AVFrame *filt_frame, unsigned int str
   AVPacket enc_pkt;
   int ret;
   int got_frame_local;
-  int stream_nb;
 
   if (!got_frame)
     got_frame = &got_frame_local;
 
-  stream_nb = ctx->stream_map[stream_index];
-  out_stream = ctx->ofmt_ctx->streams[stream_nb];
+  out_stream = ctx->ofmt_ctx->streams[stream_index];
 
   // Encode filtered frame
   enc_pkt.data = NULL;
@@ -277,18 +278,18 @@ encode_write_frame(struct encode_ctx *ctx, AVFrame *filt_frame, unsigned int str
     return 0;
 
   // Prepare packet for muxing
-  enc_pkt.stream_index = stream_nb;
+  enc_pkt.stream_index = stream_index;
 
   // This "wonderful" peace of code makes sure that the timestamp never decreases,
   // even if the user seeked backwards. The muxer will not accept decreasing
   // timestamps
-  enc_pkt.pts += ctx->offset_pts[stream_nb];
-  if (enc_pkt.pts < ctx->prev_pts[stream_nb])
+  enc_pkt.pts += ctx->offset_pts[stream_index];
+  if (enc_pkt.pts < ctx->prev_pts[stream_index])
     {
-      ctx->offset_pts[stream_nb] += ctx->prev_pts[stream_nb] - enc_pkt.pts;
-      enc_pkt.pts = ctx->prev_pts[stream_nb];
+      ctx->offset_pts[stream_index] += ctx->prev_pts[stream_index] - enc_pkt.pts;
+      enc_pkt.pts = ctx->prev_pts[stream_index];
     }
-  ctx->prev_pts[stream_nb] = enc_pkt.pts;
+  ctx->prev_pts[stream_index] = enc_pkt.pts;
   enc_pkt.dts = enc_pkt.pts; //FIXME
 
   av_packet_rescale_ts(&enc_pkt, out_stream->codec->time_base, out_stream->time_base);
@@ -352,11 +353,9 @@ filter_encode_write_frame(struct encode_ctx *ctx, AVFrame *frame, unsigned int s
   AVFilterBufferRef *picref;
   AVCodecContext *enc_ctx;
   AVFrame *filt_frame;
-  int stream_nb;
   int ret;
 
-  stream_nb = ctx->stream_map[stream_index];
-  enc_ctx = ctx->ofmt_ctx->streams[stream_nb]->codec;
+  enc_ctx = ctx->ofmt_ctx->streams[stream_index]->codec;
 
   // Push the decoded frame into the filtergraph
   ret = av_buffersrc_write_frame(ctx->filter_ctx[stream_index].buffersrc_ctx, frame);
@@ -408,17 +407,12 @@ filter_encode_write_frame(struct encode_ctx *ctx, AVFrame *frame, unsigned int s
 static void
 flush_encoder(struct encode_ctx *ctx, unsigned int stream_index)
 {
-  int stream_nb;
   int ret;
   int got_frame;
 
-  stream_nb = ctx->stream_map[stream_index];
-  if (stream_nb < 0)
-    return;
+  DPRINTF(E_DBG, L_XCODE, "Flushing output stream #%u encoder\n", stream_index);
 
-  DPRINTF(E_DBG, L_XCODE, "Flushing output stream #%u encoder\n", stream_nb);
-
-  if (!(ctx->ofmt_ctx->streams[stream_nb]->codec->codec->capabilities & CODEC_CAP_DELAY))
+  if (!(ctx->ofmt_ctx->streams[stream_index]->codec->codec->capabilities & CODEC_CAP_DELAY))
     return;
 
   do
@@ -561,7 +555,7 @@ open_output(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
   int i;
 
   ctx->ofmt_ctx = NULL;
-  avformat_alloc_output_context2(&ctx->ofmt_ctx, NULL, ctx->out_format, NULL);
+  avformat_alloc_output_context2(&ctx->ofmt_ctx, NULL, ctx->format, NULL);
   if (!ctx->ofmt_ctx)
     {
       DPRINTF(E_LOG, L_XCODE, "Could not create output context\n");
@@ -587,7 +581,7 @@ open_output(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
       in_stream = src_ctx->ifmt_ctx->streams[i];
       if (!decode_stream(src_ctx, in_stream))
 	{
-	  ctx->stream_map[i] = -1;
+	  ctx->out_stream_map[i] = -1;
 	  continue;
 	}
 
@@ -598,7 +592,8 @@ open_output(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
 	  goto out_fail_stream;
         }
 
-      ctx->stream_map[i] = out_stream->index;
+      ctx->out_stream_map[i] = out_stream->index;
+      ctx->in_stream_map[out_stream->index] = i;
 
       dec_ctx = in_stream->codec;
       enc_ctx = out_stream->codec;
@@ -611,9 +606,9 @@ open_output(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
 	}
 
       if (dec_ctx->codec_type == AVMEDIA_TYPE_AUDIO)
-	codec_id = ctx->out_audio_codec;
+	codec_id = ctx->audio_codec;
       else if (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO)
-	codec_id = ctx->out_video_codec;
+	codec_id = ctx->video_codec;
       else
 	continue;
 
@@ -630,16 +625,16 @@ open_output(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
 
       if (dec_ctx->codec_type == AVMEDIA_TYPE_AUDIO)
 	{
-	  enc_ctx->sample_rate = ctx->out_sample_rate;
-	  enc_ctx->channel_layout = ctx->out_channel_layout;
-	  enc_ctx->channels = ctx->out_channels;
-	  enc_ctx->sample_fmt = ctx->out_sample_format;
-	  enc_ctx->time_base = (AVRational){1, ctx->out_sample_rate};
+	  enc_ctx->sample_rate = ctx->sample_rate;
+	  enc_ctx->channel_layout = ctx->channel_layout;
+	  enc_ctx->channels = ctx->channels;
+	  enc_ctx->sample_fmt = ctx->sample_format;
+	  enc_ctx->time_base = (AVRational){1, ctx->sample_rate};
 	}
       else
 	{
-	  enc_ctx->height = ctx->out_video_height;
-	  enc_ctx->width = ctx->out_video_width;
+	  enc_ctx->height = ctx->video_height;
+	  enc_ctx->width = ctx->video_width;
 	  enc_ctx->sample_aspect_ratio = dec_ctx->sample_aspect_ratio; //FIXME
 	  enc_ctx->pix_fmt = avcodec_find_best_pix_fmt_of_list(encoder->pix_fmts, dec_ctx->pix_fmt, 1, NULL);
 	  enc_ctx->time_base = dec_ctx->time_base;
@@ -1006,36 +1001,34 @@ open_filter(struct filter_ctx *filter_ctx, AVCodecContext *dec_ctx, AVCodecConte
 static int
 open_filters(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
 {
-  AVCodecContext *dec_ctx;
   AVCodecContext *enc_ctx;
+  AVCodecContext *dec_ctx;
   const char *filter_spec;
+  unsigned int stream_index;
   int i;
-  int stream_nb;
   int ret;
 
-  ctx->filter_ctx = av_malloc_array(src_ctx->ifmt_ctx->nb_streams, sizeof(*ctx->filter_ctx));
+  ctx->filter_ctx = av_malloc_array(ctx->ofmt_ctx->nb_streams, sizeof(*ctx->filter_ctx));
   if (!ctx->filter_ctx)
     {
       DPRINTF(E_LOG, L_XCODE, "Out of memory for outputs/inputs\n");
       return -1;
     }
 
-  for (i = 0; i < src_ctx->ifmt_ctx->nb_streams; i++)
+  for (i = 0; i < ctx->ofmt_ctx->nb_streams; i++)
     {
       ctx->filter_ctx[i].buffersrc_ctx  = NULL;
       ctx->filter_ctx[i].buffersink_ctx = NULL;
       ctx->filter_ctx[i].filter_graph   = NULL;
 
-      stream_nb = ctx->stream_map[i];
-      if (stream_nb < 0)
-	continue;
+      stream_index = ctx->in_stream_map[i];
 
-      dec_ctx = src_ctx->ifmt_ctx->streams[i]->codec;
-      enc_ctx = ctx->ofmt_ctx->streams[stream_nb]->codec;
+      enc_ctx = ctx->ofmt_ctx->streams[i]->codec;
+      dec_ctx = src_ctx->ifmt_ctx->streams[stream_index]->codec;
 
-      if (dec_ctx->codec_type == AVMEDIA_TYPE_VIDEO)
+      if (enc_ctx->codec_type == AVMEDIA_TYPE_VIDEO)
 	filter_spec = "null"; /* passthrough (dummy) filter for video */
-      else if (dec_ctx->codec_type == AVMEDIA_TYPE_AUDIO)
+      else if (enc_ctx->codec_type == AVMEDIA_TYPE_AUDIO)
 	filter_spec = "anull"; /* passthrough (dummy) filter for audio */
       else
 	continue;
@@ -1048,7 +1041,7 @@ open_filters(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
   return 0;
 
  out_fail:
-  for (i = 0; i < src_ctx->ifmt_ctx->nb_streams; i++)
+  for (i = 0; i < ctx->ofmt_ctx->nb_streams; i++)
     {
       if (ctx->filter_ctx && ctx->filter_ctx[i].filter_graph)
 	avfilter_graph_free(&ctx->filter_ctx[i].filter_graph);
@@ -1059,11 +1052,11 @@ open_filters(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
 }
 
 static void
-close_filters(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
+close_filters(struct encode_ctx *ctx)
 {
   int i;
 
-  for (i = 0; i < src_ctx->ifmt_ctx->nb_streams; i++)
+  for (i = 0; i < ctx->ofmt_ctx->nb_streams; i++)
     {
       if (ctx->filter_ctx && ctx->filter_ctx[i].filter_graph)
 	avfilter_graph_free(&ctx->filter_ctx[i].filter_graph);
@@ -1125,7 +1118,7 @@ transcode_encode_setup(struct decode_ctx *src_ctx, enum transcode_profile profil
       return NULL;
     }
 
-  ctx->icy_interval = METADATA_ICY_INTERVAL * ctx->out_channels * ctx->out_byte_depth * ctx->out_sample_rate;
+  ctx->icy_interval = METADATA_ICY_INTERVAL * ctx->channels * ctx->byte_depth * ctx->sample_rate;
 
   if (profile == XCODE_PCM16_HEADER)
     {
@@ -1160,6 +1153,38 @@ transcode_setup(struct media_file_info *mfi, enum transcode_profile profile, off
     {
       transcode_decode_cleanup(ctx->decode_ctx);
       free(ctx);
+      return NULL;
+    }
+
+  return ctx;
+}
+
+struct decode_ctx *
+transcode_decode_setup_raw(void)
+{
+  struct decode_ctx *ctx;
+  struct AVCodec *decoder;
+
+  ctx = calloc(1, sizeof(struct decode_ctx));
+  if (!ctx)
+    {
+      DPRINTF(E_LOG, L_XCODE, "Out of memory for decode ctx\n");
+      return NULL;
+    }
+
+  ctx->ifmt_ctx = avformat_alloc_context();
+  if (!ctx->ifmt_ctx)
+    {
+      DPRINTF(E_LOG, L_XCODE, "Out of memory for decode format ctx\n");
+      return NULL;
+    }
+
+  decoder = avcodec_find_decoder(AV_CODEC_ID_PCM_S16LE);
+
+  ctx->audio_stream = avformat_new_stream(ctx->ifmt_ctx, decoder);
+  if (!ctx->audio_stream)
+    {
+      DPRINTF(E_LOG, L_XCODE, "Could not create stream with PCM16 decoder\n");
       return NULL;
     }
 
@@ -1258,15 +1283,13 @@ transcode_decode_cleanup(struct decode_ctx *ctx)
 }
 
 void
-transcode_encode_cleanup(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
+transcode_encode_cleanup(struct encode_ctx *ctx)
 {
   int i;
 
   // Flush filters and encoders
-  for (i = 0; i < src_ctx->ifmt_ctx->nb_streams; i++)
+  for (i = 0; i < ctx->ofmt_ctx->nb_streams; i++)
     {
-      if (ctx->stream_map[i] < 0)
-	continue;
       if (!ctx->filter_ctx[i].filter_graph)
 	continue;
       filter_encode_write_frame(ctx, NULL, i);
@@ -1275,7 +1298,7 @@ transcode_encode_cleanup(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
 
   av_write_trailer(ctx->ofmt_ctx);
 
-  close_filters(ctx, src_ctx);
+  close_filters(ctx);
   close_output(ctx);
   free(ctx);
 }
@@ -1283,7 +1306,7 @@ transcode_encode_cleanup(struct encode_ctx *ctx, struct decode_ctx *src_ctx)
 void
 transcode_cleanup(struct transcode_ctx *ctx)
 {
-  transcode_encode_cleanup(ctx->encode_ctx, ctx->decode_ctx);
+  transcode_encode_cleanup(ctx->encode_ctx);
   transcode_decode_cleanup(ctx->decode_ctx);
   free(ctx);
 }
@@ -1301,7 +1324,7 @@ transcode_decoded_free(struct decoded_frame *decoded)
 struct decoded_frame *
 transcode_decode(struct decode_ctx *ctx)
 {
-  struct decoded_packet *decoded;
+  struct decoded_frame *decoded;
   AVPacket packet;
   AVStream *in_stream;
   AVFrame *frame;
@@ -1384,7 +1407,7 @@ transcode_decode(struct decode_ctx *ctx)
   // Return the decoded frame and stream index
   frame->pts = av_frame_get_best_effort_timestamp(frame);
 
-  decoded = malloc(sizeof(struct decoded_packet));
+  decoded = malloc(sizeof(struct decoded_frame));
   if (!decoded)
     {
       DPRINTF(E_LOG, L_XCODE, "Out of memory for decoded result\n");
@@ -1403,10 +1426,15 @@ int
 transcode_encode(struct evbuffer *evbuf, struct decoded_frame *decoded, struct encode_ctx *ctx)
 {
   char *errmsg;
+  int stream_index;
   int encoded_length;
   int ret;
 
   encoded_length = 0;
+
+  stream_index = ctx->out_stream_map[decoded->stream_index];
+  if (stream_index < 0)
+    return -1;
 
   if (ctx->wavhdr)
     {
@@ -1415,7 +1443,7 @@ transcode_encode(struct evbuffer *evbuf, struct decoded_frame *decoded, struct e
       ctx->wavhdr = 0;
     }
 
-  ret = filter_encode_write_frame(ctx, decoded->frame, decoded->stream_index);
+  ret = filter_encode_write_frame(ctx, decoded->frame, stream_index);
   if (ret < 0)
     {
       errmsg = malloc(128);
@@ -1460,9 +1488,38 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
 }
 
 struct decoded_frame *
-transcode_raw2frame(uint8_t *rawbuf, size_t size)
+transcode_raw2frame(struct evbuffer *audio_buf)
 {
-  return NULL;
+  struct decoded_frame *decoded;
+  AVFrame *frame;
+  uint8_t *rawbuf;
+  int len;
+
+  decoded = malloc(sizeof(struct decoded_frame));
+  frame = av_frame_alloc();
+  if (!decoded || !frame)
+    {
+      DPRINTF(E_LOG, L_XCODE, "Out of memory for decoded struct or frame\n");
+      return NULL;
+    }
+
+  decoded->stream_index = 0;
+  decoded->frame = frame;
+
+  frame->nb_samples     = evbuffer_get_length(audio_buf) / 4;
+  frame->format         = AV_SAMPLE_FMT_S16;
+  frame->channel_layout = AV_CH_LAYOUT_STEREO;
+
+  rawbuf = evbuffer_pullup(audio_buf, -1);
+  len = evbuffer_get_length(audio_buf);
+
+  if (avcodec_fill_audio_frame(frame, 2, AV_SAMPLE_FMT_S16, rawbuf, len, 0) < 0)
+    {
+      DPRINTF(E_LOG, L_XCODE, "Error filling frame with rawbuf\n");
+      return NULL;
+    }
+
+  return decoded;
 }
 
 /* TODO remux this frame without reencoding

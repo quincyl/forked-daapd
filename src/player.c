@@ -1922,6 +1922,9 @@ source_read(uint8_t *buf, int len, uint64_t rtptime)
 	      new = 1;
 	      continue;
 	    }
+
+	  if (icecast_selected)
+	    icecast_write(audio_buf);
 	}
 
       nbytes += evbuffer_remove(audio_buf, buf + nbytes, len - nbytes);
@@ -1954,9 +1957,6 @@ playback_write(void)
       playback_abort();
       return;
     }
-
-  if (icecast_selected)
-    icecast_write(rawbuf, sizeof(rawbuf));
 
   if (laudio_status & LAUDIO_F_STARTED)
     laudio_write(rawbuf, last_rtptime);

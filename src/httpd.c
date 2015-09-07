@@ -1319,13 +1319,7 @@ httpd_init(void)
       goto dacp_fail;
     }
 
-  ret = icecast_init();
-  if (ret < 0)
-    {
-      DPRINTF(E_FATAL, L_HTTPD, "ICECAST init failed\n");
-
-      goto icecast_fail;
-    }
+  icecast_init();
 
 #ifdef USE_EVENTFD
   exit_efd = eventfd(0, EFD_CLOEXEC);
@@ -1404,7 +1398,6 @@ httpd_init(void)
 #endif
  pipe_fail:
   icecast_deinit();
- icecast_fail:
   dacp_deinit();
  dacp_fail:
   daap_deinit();

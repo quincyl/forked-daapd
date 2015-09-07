@@ -12,7 +12,9 @@ struct icecast_ctx {
   struct icecast_request *requests;
 
   struct evbuffer *encoded_data;
+
   struct encode_ctx *encode_ctx;
+  struct decode_ctx *decode_ctx;
 
   struct spsc_queue *queue;
 };
@@ -98,17 +100,11 @@ icecast_send_cb(evutil_socket_t fd, short event, void *arg)
 
 // Thread: player
 static int
-icecast_cb(uint8_t *rawbuf, size_t size)
+icecast_cb(void *audio_buf)
 {
   struct decoded_frame *decoded;
 
-  if (size != ICECAST_RAWBUF_SIZE)
-    {
-      DPRINTF(E_LOG, L_HTTPD, "Bug! Unexpected buffer size\n");
-      return -1;
-    }
-
-  decoded = transcode_raw2frame(rawbuf, size);
+  decoded = transcode_raw2frame(audio_buf);
   if (!decoded)
     {
       DPRINTF(E_LOG, L_HTTPD, "Could not convert raw PCM to frame\n");
@@ -183,7 +179,14 @@ icecast_request(struct evhttp_request *req)
 static int
 icecast_init(void)
 {
-  icecast_ctx.encode_ctx = transcode_encode_setup(XCODE_MP3, NULL);
+  icecast_ctx.decode_ctx = transcode_decode_setup_raw();
+  if (!icecast_ctx.decode_ctx)
+    {
+      DPRINTF(E_LOG, L_HTTPD, "Could not create Icecast dummy decoding context\n");
+      return -1;
+    }
+
+  icecast_ctx.encode_ctx = transcode_encode_setup(icecast_ctx.decode_ctx, XCODE_MP3, NULL);
   if (!icecast_ctx.encode_ctx)
     {
       DPRINTF(E_LOG, L_HTTPD, "Icecasting will not be available, libav does not support mp3 encoding\n");
@@ -200,9 +203,9 @@ icecast_init(void)
   icecast_ctx.encoded_data = evbuffer_new();
 
   icecastev = event_new(evbase_httpd, -1, EV_PERSIST, icecast_send_cb, NULL);
-  if (!icecastev)
+  if (!icecast_ctx.encoded_data || !icecastev)
     {
-      DPRINTF(E_LOG, L_HTTPD, "Out of memory for icecast event\n");
+      DPRINTF(E_LOG, L_HTTPD, "Out of memory for icecast encoded_data or event\n");
       return -1;
     }
 
@@ -227,6 +230,7 @@ icecast_deinit(void)
       free(ir);
     }
 
+  transcode_decode_cleanup(icecast_ctx.decode_ctx);
   transcode_encode_cleanup(icecast_ctx.encode_ctx);
   evbuffer_free(icecast_ctx.encoded_data);
   free(icecast_ctx.queue);

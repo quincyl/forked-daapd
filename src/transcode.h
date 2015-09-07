@@ -39,6 +39,9 @@ transcode_encode_setup(struct decode_ctx *src_ctx, enum transcode_profile profil
 struct transcode_ctx *
 transcode_setup(struct media_file_info *mfi, enum transcode_profile profile, off_t *est_size);
 
+struct decode_ctx *
+transcode_decode_setup_raw(void);
+
 int
 transcode_needed(const char *user_agent, const char *client_codecs, char *file_codectype);
 
@@ -47,7 +50,7 @@ void
 transcode_decode_cleanup(struct decode_ctx *ctx);
 
 void
-transcode_encode_cleanup(struct encode_ctx *ctx, struct decode_ctx *src_ctx);
+transcode_encode_cleanup(struct encode_ctx *ctx);
 
 void
 transcode_cleanup(struct transcode_ctx *ctx);
@@ -66,7 +69,7 @@ int
 transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *icy_timer);
 
 struct decoded_frame *
-transcode_raw2frame(uint8_t *rawbuf, size_t size);
+transcode_raw2frame(struct evbuffer *audio_buf);
 
 // Seeking
 int
