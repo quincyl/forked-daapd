@@ -69,7 +69,7 @@ int
 transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *icy_timer);
 
 struct decoded_frame *
-transcode_raw2frame(struct evbuffer *audio_buf);
+transcode_raw2frame(uint8_t *data, size_t size);
 
 // Seeking
 int

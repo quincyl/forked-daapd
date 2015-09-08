@@ -11,16 +11,14 @@ struct icecast_request {
 struct icecast_ctx {
   struct icecast_request *requests;
 
+  uint8_t rawbuf[ICECAST_RAWBUF_SIZE];
   struct evbuffer *encoded_data;
-
   struct encode_ctx *encode_ctx;
-  struct decode_ctx *decode_ctx;
-
-  struct spsc_queue *queue;
 };
 
-struct icecast_ctx icecast_ctx;
-struct event *icecastev;
+static struct icecast_ctx icecast_ctx;
+static struct event *icecastev;
+static int icecast_pipe[2];
 
 static void
 icecast_fail_cb(struct evhttp_connection *evcon, void *arg)
@@ -59,7 +57,7 @@ icecast_is_request(struct evhttp_request *req, char *uri)
   char *ptr;
 
   ptr = strrchr(uri, '/');
-  if (!ptr || (strcasecmp(ptr, "stream.mp3") != 0))
+  if (!ptr || (strcasecmp(ptr, "/stream.mp3") != 0))
     return 0;
 
   return 1;
@@ -71,14 +69,20 @@ icecast_send_cb(evutil_socket_t fd, short event, void *arg)
   struct icecast_request *ir;
   struct evbuffer *evbuf;
   struct decoded_frame *decoded;
+  uint8_t *buf;
+  int len;
   int ret;
 
-  if (!pthread_equal(pthread_self(), tid_httpd))
-    DPRINTF(E_INFO, L_HTTPD, "OH NO IT IS THE WRONG THREAD\n");
-
-  ret = spsc_queue_pop(icecast_ctx.queue, (void *)&decoded);
+  ret = read(icecast_pipe[0], &icecast_ctx.rawbuf, ICECAST_RAWBUF_SIZE);
   if (ret < 0)
     return; // or spin?
+
+  decoded = transcode_raw2frame(icecast_ctx.rawbuf, ICECAST_RAWBUF_SIZE);
+  if (!decoded)
+    {
+      DPRINTF(E_LOG, L_HTTPD, "Could not convert raw PCM to frame\n");
+      return;
+    }
 
   ret = transcode_encode(icecast_ctx.encoded_data, decoded, icecast_ctx.encode_ctx);
   transcode_decoded_free(decoded);
@@ -86,37 +90,39 @@ icecast_send_cb(evutil_socket_t fd, short event, void *arg)
     return;
 
   // Collect data until chunk_size is reached, then send
-  if (evbuffer_get_length(icecast_ctx.encoded_data) < STREAM_CHUNK_SIZE)
+  len = evbuffer_get_length(icecast_ctx.encoded_data);
+  if (len < STREAM_CHUNK_SIZE)
     return;
 
   // Send data
   evbuf = evbuffer_new();
   for (ir = icecast_ctx.requests; ir; ir = ir->next)
     {
-      evbuffer_add_buffer_reference(evbuf, icecast_ctx.encoded_data);
-      evhttp_send_reply_chunk(ir->req, evbuf);
+      if (ir->next)
+	{
+	  buf = evbuffer_pullup(icecast_ctx.encoded_data, -1);
+	  evbuffer_add(evbuf, buf, len);
+	  evhttp_send_reply_chunk(ir->req, evbuf);
+	}
+      else
+	evhttp_send_reply_chunk(ir->req, icecast_ctx.encoded_data);
     }
+  evbuffer_free(evbuf);
 }
 
 // Thread: player
 static int
-icecast_cb(void *audio_buf)
+icecast_cb(uint8_t *rawbuf, size_t size)
 {
-  struct decoded_frame *decoded;
-
-  decoded = transcode_raw2frame(audio_buf);
-  if (!decoded)
+  if (size != ICECAST_RAWBUF_SIZE)
     {
-      DPRINTF(E_LOG, L_HTTPD, "Could not convert raw PCM to frame\n");
+      DPRINTF(E_LOG, L_HTTPD, "Bug! Buffer size in icecast_cb must be adjusted\n");
       return -1;
     }
 
-  // Push a pointer to the decoded audio buffer from the player to the queue
-  // and wake the evhttp_base loop
-  if (spsc_queue_push(icecast_ctx.queue, decoded) != 0)
+  if (write(icecast_pipe[1], rawbuf, size) < 0)
     return -1;
 
-  event_active(icecastev, 0, 0);
   return 0;
 }
 
@@ -142,8 +148,6 @@ icecast_request(struct evhttp_request *req)
 
   DPRINTF(E_INFO, L_HTTPD, "Beginning Icecast streaming to %s:%d\n", address, (int)port);
 
-  free(address); // Not clear if we should free this?
-
   output_headers = evhttp_request_get_output_headers(req);
   evhttp_add_header(output_headers, "Content-Type", "audio/mpeg");
   evhttp_add_header(output_headers, "Server", "forked-daapd/" VERSION);
@@ -151,7 +155,8 @@ icecast_request(struct evhttp_request *req)
   evhttp_add_header(output_headers, "Pragma", "no-cache");
   evhttp_add_header(output_headers, "Expires", "Mon, 31 Aug 2015 06:00:00 GMT");
   evhttp_add_header(output_headers, "icy-br", "128");
-  evhttp_add_header(output_headers, "icy-name", "Testing FD");
+  evhttp_add_header(output_headers, "icy-name", "forked-daapd");
+  evhttp_add_header(output_headers, "Connection", "Keep-Alive"); //TODO ?
 
   // TODO ICY metaint
   evhttp_send_reply_start(req, HTTP_OK, "OK");
@@ -179,37 +184,54 @@ icecast_request(struct evhttp_request *req)
 static int
 icecast_init(void)
 {
-  icecast_ctx.decode_ctx = transcode_decode_setup_raw();
-  if (!icecast_ctx.decode_ctx)
+  struct decode_ctx *decode_ctx;
+  int ret;
+
+  decode_ctx = transcode_decode_setup_raw();
+  if (!decode_ctx)
     {
-      DPRINTF(E_LOG, L_HTTPD, "Could not create Icecast dummy decoding context\n");
+      DPRINTF(E_LOG, L_HTTPD, "Could not create Icecast decoding context\n");
       return -1;
     }
 
-  icecast_ctx.encode_ctx = transcode_encode_setup(icecast_ctx.decode_ctx, XCODE_MP3, NULL);
+  icecast_ctx.encode_ctx = transcode_encode_setup(decode_ctx, XCODE_MP3, NULL);
+  transcode_decode_cleanup(decode_ctx);
   if (!icecast_ctx.encode_ctx)
     {
       DPRINTF(E_LOG, L_HTTPD, "Icecasting will not be available, libav does not support mp3 encoding\n");
       return -1;
     }
 
-  icecast_ctx.queue = spsc_queue_new();
-  if (!icecast_ctx.queue)
+# if defined(__linux__)
+  ret = pipe2(icecast_pipe, O_CLOEXEC);
+# else
+  ret = pipe(icecast_pipe);
+# endif
+  if (ret < 0)
     {
-      DPRINTF(E_LOG, L_HTTPD, "Out of memory for icecast queue\n");
-      return -1;
+      DPRINTF(E_FATAL, L_HTTPD, "Could not create Icecast pipe: %s\n", strerror(errno));
+      goto pipe_fail;
     }
 
   icecast_ctx.encoded_data = evbuffer_new();
-
-  icecastev = event_new(evbase_httpd, -1, EV_PERSIST, icecast_send_cb, NULL);
+  icecastev = event_new(evbase_httpd, icecast_pipe[0], EV_READ | EV_PERSIST, icecast_send_cb, NULL);
   if (!icecast_ctx.encoded_data || !icecastev)
     {
       DPRINTF(E_LOG, L_HTTPD, "Out of memory for icecast encoded_data or event\n");
-      return -1;
+      goto event_fail;
     }
 
+  event_add(icecastev, NULL);
+
   return 0;
+
+ event_fail:
+  close(icecast_pipe[0]);
+  close(icecast_pipe[1]);
+ pipe_fail:
+  transcode_encode_cleanup(icecast_ctx.encode_ctx);
+
+  return -1;
 }
 
 static void
@@ -230,8 +252,9 @@ icecast_deinit(void)
       free(ir);
     }
 
-  transcode_decode_cleanup(icecast_ctx.decode_ctx);
+  close(icecast_pipe[0]);
+  close(icecast_pipe[1]);
+
   transcode_encode_cleanup(icecast_ctx.encode_ctx);
   evbuffer_free(icecast_ctx.encoded_data);
-  free(icecast_ctx.queue);
 }

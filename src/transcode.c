@@ -1188,6 +1188,12 @@ transcode_decode_setup_raw(void)
       return NULL;
     }
 
+  ctx->audio_stream->codec->time_base.num  = 1;
+  ctx->audio_stream->codec->time_base.den  = 44100;
+  ctx->audio_stream->codec->sample_rate    = 44100;
+  ctx->audio_stream->codec->sample_fmt     = AV_SAMPLE_FMT_S16;
+  ctx->audio_stream->codec->channel_layout = AV_CH_LAYOUT_STEREO;
+
   return ctx;
 }
 
@@ -1488,12 +1494,10 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
 }
 
 struct decoded_frame *
-transcode_raw2frame(struct evbuffer *audio_buf)
+transcode_raw2frame(uint8_t *data, size_t size)
 {
   struct decoded_frame *decoded;
   AVFrame *frame;
-  uint8_t *rawbuf;
-  int len;
 
   decoded = malloc(sizeof(struct decoded_frame));
   frame = av_frame_alloc();
@@ -1506,14 +1510,14 @@ transcode_raw2frame(struct evbuffer *audio_buf)
   decoded->stream_index = 0;
   decoded->frame = frame;
 
-  frame->nb_samples     = evbuffer_get_length(audio_buf) / 4;
+  avcodec_get_frame_defaults(frame);
+  frame->nb_samples     = size / 4;
   frame->format         = AV_SAMPLE_FMT_S16;
   frame->channel_layout = AV_CH_LAYOUT_STEREO;
+  frame->pts            = AV_NOPTS_VALUE;
+  frame->sample_rate    = 44100;
 
-  rawbuf = evbuffer_pullup(audio_buf, -1);
-  len = evbuffer_get_length(audio_buf);
-
-  if (avcodec_fill_audio_frame(frame, 2, AV_SAMPLE_FMT_S16, rawbuf, len, 0) < 0)
+  if (avcodec_fill_audio_frame(frame, 2, frame->format, data, size, 0) < 0)
     {
       DPRINTF(E_LOG, L_XCODE, "Error filling frame with rawbuf\n");
       return NULL;

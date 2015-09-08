@@ -37,17 +37,6 @@ safe_atou64(const char *str, uint64_t *val);
 int
 safe_hextou64(const char *str, uint64_t *val);
 
-/* Single producer single consumer lock free queue (Lamport style) */
-struct spsc_queue;
-
-struct spsc_queue *
-spsc_queue_new(void);
-
-int
-spsc_queue_push(struct spsc_queue *queue, void *arg);
-
-int
-spsc_queue_pop(struct spsc_queue *queue, void **arg);
 
 /* Key/value functions */
 struct keyval *

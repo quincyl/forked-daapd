@@ -40,16 +40,6 @@
 #include "logger.h"
 #include "misc.h"
 
-#define SPSC_QUEUE_LENGTH 64
-
-struct spsc_queue
-{
-  int head;
-  int tail;
-  
-  void *buffer[SPSC_QUEUE_LENGTH];
-};
-
 
 int
 safe_atoi32(const char *str, int32_t *val)
@@ -271,31 +261,6 @@ safe_hextou64(const char *str, uint64_t *val)
   return 0;
 }
 
-struct spsc_queue *
-spsc_queue_new(void)
-{
-  return calloc(1, sizeof(struct spsc_queue));
-}
-
-int
-spsc_queue_push(struct spsc_queue *queue, void *arg)
-{
-  if ((queue->head + 1) % SPSC_QUEUE_LENGTH == queue->tail)
-    return -1;
-  queue->buffer[queue->head] = arg;
-  queue->head = (queue->head + 1) % SPSC_QUEUE_LENGTH;
-  return 0;
-}
-
-int
-spsc_queue_pop(struct spsc_queue *queue, void **arg)
-{
-  if (queue->tail == queue->head)
-    return -1;
-  *arg = queue->buffer[queue->tail];
-  queue->tail = (queue->tail + 1) % SPSC_QUEUE_LENGTH;
-  return 0;
-}
 
 /* Key/value functions */
 struct keyval *
