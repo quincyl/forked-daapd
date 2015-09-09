@@ -2,11 +2,8 @@
 #ifndef __TRANSCODE_H__
 #define __TRANSCODE_H__
 
-#ifdef HAVE_LIBEVENT2
-# include <event2/buffer.h>
-#else
-# include <event.h>
-#endif
+#include <event2/buffer.h>
+#include "db.h"
 #include "http.h"
 
 #define XCODE_WAVHEADER (1 << 14)
@@ -70,6 +67,9 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
 
 struct decoded_frame *
 transcode_raw2frame(uint8_t *data, size_t size);
+
+int
+transcode_encode_frame_size(struct encode_ctx *ctx);
 
 // Seeking
 int

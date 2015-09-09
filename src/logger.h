@@ -31,8 +31,9 @@
 #define L_LASTFM  22
 #define L_CACHE   23
 #define L_MPD     24
+#define L_ICECAST 25
 
-#define N_LOGDOMAINS  25
+#define N_LOGDOMAINS  26
 
 /* Severities */
 #define E_FATAL   0

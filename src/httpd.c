@@ -51,6 +51,7 @@
 #include "httpd_rsp.h"
 #include "httpd_daap.h"
 #include "httpd_dacp.h"
+#include "httpd_icecast.h"
 #include "transcode.h"
 
 /*
@@ -126,7 +127,6 @@ static pthread_t tid_httpd;
 struct stream_ctx *g_st;
 #endif
 
-#include "httpd_icecast.c"
 
 static void
 stream_end(struct stream_ctx *st, int failed)
