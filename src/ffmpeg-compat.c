@@ -1,12 +1,24 @@
 #include <libavutil/channel_layout.h>
 #include <libavutil/mathematics.h>
 
-#define avcodec_find_best_pix_fmt_of_list(a, b, c, d) avcodec_find_best_pix_fmt2((enum AVPixelFormat *)(a), (b), (c), (d))
-#define av_frame_free(x) avcodec_free_frame((x))
-#define av_frame_alloc() avcodec_alloc_frame()
-#define av_copy_packet(dst, src) memcpy(dst, src, sizeof(AVPacket))
-#define av_frame_get_best_effort_timestamp(x) (x)->pts
+#ifndef HAVE_FFMPEG
+# define avcodec_find_best_pix_fmt_of_list(a, b, c, d) avcodec_find_best_pix_fmt2((enum AVPixelFormat *)(a), (b), (c), (d))
+#endif
 
+#ifndef HAVE_LIBAV_COPY_PACKET
+# define av_copy_packet(dst, src) memcpy(dst, src, sizeof(AVPacket))
+#endif
+
+#ifndef HAVE_LIBAV_FRAME_ALLOC
+# define av_frame_alloc() avcodec_alloc_frame()
+# define av_frame_free(x) avcodec_free_frame((x))
+#endif
+
+#ifndef HAVE_LIBAV_BEST_EFFORT_TIMESTAMP
+# define av_frame_get_best_effort_timestamp(x) (x)->pts
+#endif
+
+#ifndef HAVE_LIBAV_PACKET_RESCALE_TS
 void av_packet_rescale_ts(AVPacket *pkt, AVRational src_tb, AVRational dst_tb)
 {
     if (pkt->pts != AV_NOPTS_VALUE)
@@ -18,7 +30,9 @@ void av_packet_rescale_ts(AVPacket *pkt, AVRational src_tb, AVRational dst_tb)
     if (pkt->convergence_duration > 0)
         pkt->convergence_duration = av_rescale_q(pkt->convergence_duration, src_tb, dst_tb);
 }
+#endif
 
+#ifndef HAVE_LIBAV_ALLOC_OUTPUT_CONTEXT2
 int avformat_alloc_output_context2(AVFormatContext **avctx, AVOutputFormat *oformat,
                                    const char *format, const char *filename)
 {
@@ -71,4 +85,4 @@ error:
     avformat_free_context(s);
     return ret;
 }
-
+#endif

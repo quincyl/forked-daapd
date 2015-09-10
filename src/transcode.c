@@ -299,7 +299,7 @@ encode_write_frame(struct encode_ctx *ctx, AVFrame *filt_frame, unsigned int str
   return ret;
 }
 
-#ifdef HAVE_LIBAVFILTER
+#if defined(HAVE_LIBAV_BUFFERSRC_ADD_FRAME_FLAGS) && defined(HAVE_LIBAV_BUFFERSINK_GET_FRAME)
 static int
 filter_encode_write_frame(struct encode_ctx *ctx, AVFrame *frame, unsigned int stream_index)
 {
@@ -695,7 +695,7 @@ close_output(struct encode_ctx *ctx)
   avformat_free_context(ctx->ofmt_ctx);
 }
 
-#ifdef HAVE_LIBAVFILTER
+#ifdef HAVE_LIBAV_GRAPH_PARSE_PTR
 static int
 open_filter(struct filter_ctx *filter_ctx, AVCodecContext *dec_ctx, AVCodecContext *enc_ctx, const char *filter_spec)
 {
@@ -1510,7 +1510,6 @@ transcode_raw2frame(uint8_t *data, size_t size)
   decoded->stream_index = 0;
   decoded->frame = frame;
 
-  avcodec_get_frame_defaults(frame);
   frame->nb_samples     = size / 4;
   frame->format         = AV_SAMPLE_FMT_S16;
   frame->channel_layout = AV_CH_LAYOUT_STEREO;
