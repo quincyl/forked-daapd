@@ -46,7 +46,10 @@ extern struct event_base *evbase_httpd;
 // Seconds between sending silence when player is idle
 // (to prevent client from hanging up)
 #define ICECAST_SILENCE_INTERVAL 1
+// Buffer size for transmitting from player to httpd thread
 #define ICECAST_RAWBUF_SIZE (STOB(AIRTUNES_V2_PACKET_SAMPLES))
+// Should prevent that we keep transcoding to dead connections
+#define ICECAST_CONNECTION_TIMEOUT 60
 
 // Linked list of Icecast requests
 struct icecast_request {
@@ -54,15 +57,12 @@ struct icecast_request {
   struct icecast_request *next;
 };
 static struct icecast_request *icecast_requests;
+static struct timeval icecast_silence_tv = { ICECAST_SILENCE_INTERVAL, 0 };
 
 // Input buffer, output buffer and encoding ctx for transcode
 static uint8_t icecast_rawbuf[ICECAST_RAWBUF_SIZE];
 static struct encode_ctx *icecast_encode_ctx;
 static struct evbuffer *icecast_encoded_data;
-
-// Holds a mp3 buffer of silence
-static struct evbuffer *icecast_silence;
-static struct timeval icecast_silence_tv = { ICECAST_SILENCE_INTERVAL, 0 };
 
 // Used for pushing events and data from the player
 static struct event *icecastev;
@@ -78,7 +78,7 @@ icecast_fail_cb(struct evhttp_connection *evcon, void *arg)
 
   this = (struct icecast_request *)arg;
 
-  DPRINTF(E_WARN, L_ICECAST, "Connection failed; stopping Icecasting to client\n");
+  DPRINTF(E_WARN, L_ICECAST, "Connection failed; stopping mp3 stream to client\n");
 
   prev = NULL;
   for (ir = icecast_requests; ir; ir = ir->next)
@@ -122,26 +122,24 @@ icecast_send_cb(evutil_socket_t fd, short event, void *arg)
       ret = read(icecast_pipe[0], &icecast_rawbuf, ICECAST_RAWBUF_SIZE);
       if (ret < 0)
 	return;
-
-      decoded = transcode_raw2frame(icecast_rawbuf, ICECAST_RAWBUF_SIZE);
-      if (!decoded)
-	{
-	  DPRINTF(E_LOG, L_ICECAST, "Could not convert raw PCM to frame\n");
-	  return;
-	}
-
-      ret = transcode_encode(icecast_encoded_data, decoded, icecast_encode_ctx);
-      transcode_decoded_free(decoded);
-      if (ret < 0)
-	return;
     }
   // Player is idle, so event timed out and we will send some mp3 silence
   else
     {
-      buf = evbuffer_pullup(icecast_silence, -1);
-      len = evbuffer_get_length(icecast_silence);
-      evbuffer_add(icecast_encoded_data, buf, len);
+      memset(&icecast_rawbuf, 0, ICECAST_RAWBUF_SIZE);
     }
+
+  decoded = transcode_raw2frame(icecast_rawbuf, ICECAST_RAWBUF_SIZE);
+  if (!decoded)
+    {
+      DPRINTF(E_LOG, L_ICECAST, "Could not convert raw PCM to frame\n");
+      return;
+    }
+
+  ret = transcode_encode(icecast_encoded_data, decoded, icecast_encode_ctx);
+  transcode_decoded_free(decoded);
+  if (ret < 0)
+    return;
 
   len = evbuffer_get_length(icecast_encoded_data);
 
@@ -167,7 +165,7 @@ icecast_cb(uint8_t *rawbuf, size_t size)
 {
   if (size != ICECAST_RAWBUF_SIZE)
     {
-      DPRINTF(E_LOG, L_ICECAST, "Bug! Buffer size in icecast_cb must be adjusted\n");
+      DPRINTF(E_LOG, L_ICECAST, "Bug! Buffer size in icecast_cb does not equal input from player\n");
       return -1;
     }
 
@@ -202,7 +200,7 @@ icecast_request(struct evhttp_request *req)
 
   if (!icecast_encode_ctx)
     {
-      DPRINTF(E_LOG, L_ICECAST, "Got Icecast request, but cannot encode to mp3\n");
+      DPRINTF(E_LOG, L_ICECAST, "Got mp3 stream request, but cannot encode to mp3\n");
 
       evhttp_send_error(req, HTTP_NOTFOUND, "Not Found");
       return -1;
@@ -211,7 +209,7 @@ icecast_request(struct evhttp_request *req)
   evcon = evhttp_request_get_connection(req);
   evhttp_connection_get_peer(evcon, &address, &port);
 
-  DPRINTF(E_INFO, L_ICECAST, "Beginning Icecast streaming to %s:%d\n", address, (int)port);
+  DPRINTF(E_INFO, L_ICECAST, "Beginning mp3 streaming to %s:%d\n", address, (int)port);
 
   lib = cfg_getsec(cfg, "library");
   name = cfg_getstr(lib, "name");
@@ -240,6 +238,7 @@ icecast_request(struct evhttp_request *req)
   ir->next = icecast_requests;
   icecast_requests = ir;
 
+  evhttp_connection_set_timeout(evcon, ICECAST_CONNECTION_TIMEOUT);
   evhttp_connection_set_closecb(evcon, icecast_fail_cb, ir);
 
   player_icecast_start(icecast_cb);
@@ -251,9 +250,6 @@ int
 icecast_init(void)
 {
   struct decode_ctx *decode_ctx;
-  struct decoded_frame *decoded;
-  uint8_t *raw;
-  int frame_size;
   int ret;
 
   decode_ctx = transcode_decode_setup_raw();
@@ -267,33 +263,7 @@ icecast_init(void)
   transcode_decode_cleanup(decode_ctx);
   if (!icecast_encode_ctx)
     {
-      DPRINTF(E_LOG, L_ICECAST, "Icecasting will not be available, libav does not support mp3 encoding\n");
-      return -1;
-    }
-
-  // Make a evbuffer with mp3 silence to send when the player is idle
-  frame_size = transcode_encode_frame_size(icecast_encode_ctx);
-  raw = calloc(1, STOB(frame_size));
-  if (!raw)
-    {
-      DPRINTF(E_LOG, L_ICECAST, "Out of memory for raw silence buffer\n");
-      return -1;
-    }
-
-  icecast_silence = evbuffer_new();
-  decoded = transcode_raw2frame(raw, STOB(frame_size));
-  if (!icecast_silence || !decoded)
-    {
-      DPRINTF(E_LOG, L_ICECAST, "Could not create silence buffer or frame\n");
-      free(raw);
-      return -1;
-    }
-
-  ret = transcode_encode(icecast_silence, decoded, icecast_encode_ctx);
-  transcode_decoded_free(decoded);
-  if (ret < 0)
-    {
-      DPRINTF(E_LOG, L_ICECAST, "Could not mp3 encode silence buffer\n");
+      DPRINTF(E_LOG, L_ICECAST, "Will not be able to stream mp3, libav does not support mp3 encoding\n");
       return -1;
     }
 
