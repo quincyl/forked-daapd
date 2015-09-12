@@ -1356,7 +1356,7 @@ transcode_decode(struct decode_ctx *ctx)
 	{
 	  errmsg = malloc(128);
 	  av_strerror(ret, errmsg, 128);
-	  DPRINTF(E_LOG, L_XCODE, "Error trying to read frame: %s\n", errmsg);
+	  DPRINTF(E_WARN, L_XCODE, "Could not read frame: %s\n", errmsg);
 	  free(errmsg);
           return NULL;
 	}
