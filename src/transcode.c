@@ -1349,6 +1349,7 @@ transcode_decode(struct decode_ctx *ctx)
       if (ctx->resume)
 	{
 	  av_copy_packet(&packet, &ctx->seek_packet);
+	  av_init_packet(&ctx->seek_packet);
 	  ctx->resume = 0;
         }
       else if ((ret = av_read_frame(ctx->ifmt_ctx, &packet)) < 0)
@@ -1387,6 +1388,7 @@ transcode_decode(struct decode_ctx *ctx)
   av_free_packet(&packet);
 
   // On failure, try reading another packet (just one)
+  // TODO Check if treating !got_frame like this is ok
   if (!got_frame || (ret < 0))
     {
       av_frame_free(&frame);
