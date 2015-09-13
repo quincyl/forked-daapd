@@ -267,11 +267,8 @@ icecast_init(void)
       return -1;
     }
 
-# if defined(__linux__)
-  ret = pipe2(icecast_pipe, O_CLOEXEC);
-# else
-  ret = pipe(icecast_pipe);
-# endif
+  // Non-blocking because otherwise httpd and player thread may deadlock
+  ret = pipe2(icecast_pipe, O_CLOEXEC | O_NONBLOCK);
   if (ret < 0)
     {
       DPRINTF(E_FATAL, L_ICECAST, "Could not create pipe: %s\n", strerror(errno));
