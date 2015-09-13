@@ -1527,20 +1527,6 @@ transcode_raw2frame(uint8_t *data, size_t size)
   return decoded;
 }
 
-int
-transcode_encode_frame_size(struct encode_ctx *ctx)
-{
-  int i;
-
-  for (i = 0; i < ctx->ofmt_ctx->nb_streams; i++)
-    {
-      if (ctx->ofmt_ctx->streams[i]->codec->codec_type == AVMEDIA_TYPE_AUDIO)
-	break;
-    }
-
-  return ctx->ofmt_ctx->streams[i]->codec->frame_size;
-}
-
 
 /* TODO remux this frame without reencoding
 	  av_packet_rescale_ts(&packet, in_stream->time_base, out_stream->time_base);

@@ -68,9 +68,6 @@ transcode(struct transcode_ctx *ctx, struct evbuffer *evbuf, int wanted, int *ic
 struct decoded_frame *
 transcode_raw2frame(uint8_t *data, size_t size);
 
-int
-transcode_encode_frame_size(struct encode_ctx *ctx);
-
 // Seeking
 int
 transcode_seek(struct transcode_ctx *ctx, int ms);
