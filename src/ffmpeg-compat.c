@@ -1,5 +1,10 @@
-#include <libavutil/channel_layout.h>
-#include <libavutil/mathematics.h>
+#ifdef HAVE_LIBAVUTIL_CHANNEL_LAYOUT_H
+# include <libavutil/channel_layout.h>
+#endif
+
+#ifdef HAVE_LIBAVUTIL_MATHEMATICS_H
+# include <libavutil/mathematics.h>
+#endif
 
 #ifndef HAVE_FFMPEG
 # define avcodec_find_best_pix_fmt_of_list(a, b, c, d) avcodec_find_best_pix_fmt2((enum AVPixelFormat *)(a), (b), (c), (d))

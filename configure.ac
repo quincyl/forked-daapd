@@ -158,6 +158,9 @@ AC_CHECK_LIB([avutil], [av_frame_alloc],
 	AC_DEFINE(HAVE_LIBAV_FRAME_ALLOC, 1, [Define to 1 if you have ffmpeg/libav with av_frame_alloc]))
 AC_CHECK_LIB([avutil], [av_frame_get_best_effort_timestamp],
 	AC_DEFINE(HAVE_LIBAV_BEST_EFFORT_TIMESTAMP, 1, [Define to 1 if you have ffmpeg/libav with av_frame_get_best_effort_timestamp]))
+
+AC_CHECK_HEADERS([libavutil/channel_layout.h])
+AC_CHECK_HEADERS([libavutil/mathematics.h])
 LIBS="$save_LIBS"
 
 PKG_CHECK_MODULES(MINIXML, [ mxml ])
