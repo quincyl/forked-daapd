@@ -324,7 +324,7 @@ icecast_init(void)
 
   // Encode some silence which will be used for playback pause and put in a permanent buffer
   remaining = ICECAST_SILENCE_INTERVAL * STOB(44100);
-  while (remaining > 0)
+  while (remaining > ICECAST_RAWBUF_SIZE)
     {
       decoded = transcode_raw2frame(icecast_rawbuf, ICECAST_RAWBUF_SIZE);
       if (!decoded)
@@ -345,6 +345,12 @@ icecast_init(void)
     }
 
   icecast_silence_size = evbuffer_get_length(icecast_encoded_data);
+  if (icecast_silence_size == 0)
+    {
+      DPRINTF(E_LOG, L_ICECAST, "The encoder didn't encode any silence\n");
+      goto silence_fail;
+    }
+
   icecast_silence_data = malloc(icecast_silence_size);
   if (!icecast_silence_data)
     {
