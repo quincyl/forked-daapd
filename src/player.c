@@ -1042,7 +1042,7 @@ stream_pause(struct player_source *ps)
 }
 
 /*
- * Seeks to the given position in miliseconds of the given player source
+ * Seeks to the given position in milliseconds of the given player source
  */
 static int
 stream_seek(struct player_source *ps, int seek_ms)
@@ -1169,13 +1169,14 @@ source_new(struct queue_item_info *item)
  * player sources (starting from the playing source). Sets current streaming
  * and playing sources to NULL.
  */
-static int
+static void
 source_stop()
 {
   struct player_source *ps_playing;
   struct player_source *ps_temp;
 
-  stream_stop(cur_streaming);
+  if (cur_streaming)
+    stream_stop(cur_streaming);
 
   ps_playing = source_now_playing();
 
@@ -1190,7 +1191,6 @@ source_stop()
 
   cur_playing = NULL;
   cur_streaming = NULL;
-  return 0;
 }
 
 /*
@@ -1293,6 +1293,9 @@ source_pause(uint64_t pos)
 /*
  * Seeks the current streaming source to the given postion in milliseconds
  * and adjusts stream-start and output-start values.
+ *
+ * @param seek_ms Position in milliseconds to seek
+ * @return The new position in milliseconds or -1 on error
  */
 static int
 source_seek(int seek_ms)
@@ -1409,8 +1412,10 @@ source_close(uint64_t end_pos)
 }
 
 /*
- * Updates cur_playing and notifies remotes and raop devices about
- * changes.
+ * Updates the now playing item (cur_playing) and notifies remotes and raop devices
+ * about changes. Also takes care of stopping playback after the last item.
+ *
+ * @return Returns the current playback position as rtp-time
  */
 static uint64_t
 source_check(void)
@@ -2449,7 +2454,12 @@ playback_start_item(struct player_command *cmd, struct queue_item_info *qii)
   if (item)
     {
       source_stop();
-      source_open(item, last_rtptime + AIRTUNES_V2_PACKET_SAMPLES, 1);
+      ret = source_open(item, last_rtptime + AIRTUNES_V2_PACKET_SAMPLES, 1);
+      if (ret < 0)
+	{
+	  playback_abort();
+	  return -1;
+	}
     }
 
   ret = source_play();
@@ -2592,6 +2602,10 @@ playback_prev_bh(struct player_command *cmd)
   int pos_sec;
   struct queue_item_info *item;
 
+  /*
+   * The upper half is playback_pause, therefor the current playing item is
+   * already set as the cur_streaming (cur_playing is NULL).
+   */
   if (!cur_streaming)
     {
       DPRINTF(E_LOG, L_PLAYER, "Could not get current stream source\n");
@@ -2650,13 +2664,19 @@ playback_prev_bh(struct player_command *cmd)
   return 0;
 }
 
-
+/*
+ * The bottom half of the next command
+ */
 static int
 playback_next_bh(struct player_command *cmd)
 {
   int ret;
   struct queue_item_info *item;
 
+  /*
+   * The upper half is playback_pause, therefor the current playing item is
+   * already set as the cur_streaming (cur_playing is NULL).
+   */
   if (!cur_streaming)
     {
       DPRINTF(E_LOG, L_PLAYER, "Could not get current stream source\n");
