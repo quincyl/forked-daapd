@@ -1274,6 +1274,7 @@ transcode_needed(const char *user_agent, const char *client_codecs, char *file_c
 void
 transcode_decode_cleanup(struct decode_ctx *ctx)
 {
+  av_free_packet(&ctx->seek_packet);
   close_input(ctx);
   free(ctx);
 }
