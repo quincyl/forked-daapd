@@ -68,9 +68,8 @@ struct decode_ctx {
   AVStream *video_stream;
   AVStream *subtitle_stream;
 
-  // Duration and total sample count
+  // Duration (used to make wav header)
   uint32_t duration;
-  uint64_t samples;
 
   // Used for seeking
   int resume;
@@ -207,21 +206,13 @@ make_wav_header(struct encode_ctx *ctx, struct decode_ctx *src_ctx, off_t *est_s
 {
   uint32_t wav_len;
   int duration;
-  int need_resample;
 
   if (src_ctx->duration)
     duration = src_ctx->duration;
   else
     duration = 3 * 60 * 1000; /* 3 minutes, in ms */
 
-  need_resample = (src_ctx->audio_stream->codec->sample_fmt != ctx->sample_format)
-                   || (src_ctx->audio_stream->codec->channels != ctx->channels)
-                   || (src_ctx->audio_stream->codec->sample_rate != ctx->sample_rate);
-
-  if (src_ctx->samples && !need_resample)
-    wav_len = ctx->channels * ctx->byte_depth * src_ctx->samples;
-  else
-    wav_len = ctx->channels * ctx->byte_depth * ctx->sample_rate * (duration / 1000);
+  wav_len = ctx->channels * ctx->byte_depth * ctx->sample_rate * (duration / 1000);
 
   *est_size = wav_len + sizeof(ctx->header);
 
@@ -1088,7 +1079,6 @@ transcode_decode_setup(struct media_file_info *mfi, int decode_video)
     }
 
   ctx->duration = mfi->song_length;
-  ctx->samples = mfi->sample_count;
 
   return ctx;
 }
