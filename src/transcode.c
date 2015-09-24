@@ -1197,33 +1197,33 @@ transcode_needed(const char *user_agent, const char *client_codecs, char *file_c
 
   if (!file_codectype)
     {
-      DPRINTF(E_LOG, L_XCODE, "Can't determine transcode status, codec type is unknown\n");
+      DPRINTF(E_LOG, L_XCODE, "Can't determine decode status, codec type is unknown\n");
       return -1;
     }
 
   lib = cfg_getsec(cfg, "library");
 
-  size = cfg_size(lib, "no_transcode");
+  size = cfg_size(lib, "no_decode");
   if (size > 0)
     {
       for (i = 0; i < size; i++)
 	{
-	  codectype = cfg_getnstr(lib, "no_transcode", i);
+	  codectype = cfg_getnstr(lib, "no_decode", i);
 
 	  if (strcmp(file_codectype, codectype) == 0)
-	    return 0; // Codectype is in no_transcode
+	    return 0; // Codectype is in no_decode
 	}
     }
 
-  size = cfg_size(lib, "force_transcode");
+  size = cfg_size(lib, "force_decode");
   if (size > 0)
     {
       for (i = 0; i < size; i++)
 	{
-	  codectype = cfg_getnstr(lib, "force_transcode", i);
+	  codectype = cfg_getnstr(lib, "force_decode", i);
 
 	  if (strcmp(file_codectype, codectype) == 0)
-	    return 1; // Codectype is in force_transcode
+	    return 1; // Codectype is in force_decode
 	}
     }
 
@@ -1260,11 +1260,11 @@ transcode_needed(const char *user_agent, const char *client_codecs, char *file_c
 
   if (strstr(client_codecs, file_codectype))
     {
-      DPRINTF(E_DBG, L_XCODE, "Codectype supported by client, no transcoding needed\n");
+      DPRINTF(E_DBG, L_XCODE, "Codectype supported by client, no decoding needed\n");
       return 0;
     }
 
-  DPRINTF(E_DBG, L_XCODE, "Will transcode\n");
+  DPRINTF(E_DBG, L_XCODE, "Will decode\n");
   return 1;
 }
 
