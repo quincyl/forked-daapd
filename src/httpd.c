@@ -51,7 +51,7 @@
 #include "httpd_rsp.h"
 #include "httpd_daap.h"
 #include "httpd_dacp.h"
-#include "httpd_icecast.h"
+#include "httpd_streaming.h"
 #include "transcode.h"
 
 /*
@@ -1038,9 +1038,9 @@ httpd_gen_cb(struct evhttp_request *req, void *arg)
 
       goto out;
     }
-  else if (icecast_is_request(req, uri))
+  else if (streaming_is_request(req, uri))
     {
-      icecast_request(req);
+      streaming_request(req);
 
       goto out;
     }
@@ -1319,7 +1319,7 @@ httpd_init(void)
       goto dacp_fail;
     }
 
-  icecast_init();
+  streaming_init();
 
 #ifdef USE_EVENTFD
   exit_efd = eventfd(0, EFD_CLOEXEC);
@@ -1397,7 +1397,7 @@ httpd_init(void)
   close(exit_pipe[1]);
 #endif
  pipe_fail:
-  icecast_deinit();
+  streaming_deinit();
   dacp_deinit();
  dacp_fail:
   daap_deinit();
@@ -1443,7 +1443,7 @@ httpd_deinit(void)
       return;
     }
 
-  icecast_deinit();
+  streaming_deinit();
   rsp_deinit();
   dacp_deinit();
   daap_deinit();

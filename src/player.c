@@ -240,9 +240,9 @@ static int laudio_selected;
 static int laudio_volume;
 static int laudio_relvol;
 static int raop_sessions;
-static int icecast_selected;
+static int streaming_selected;
 
-static player_icecast_cb icecast_write;
+static player_streaming_cb streaming_write;
 
 /* Commands */
 static struct player_command *cur_cmd;
@@ -1955,8 +1955,8 @@ playback_write(void)
       return;
     }
 
-  if (icecast_selected)
-    icecast_write(rawbuf, sizeof(rawbuf));
+  if (streaming_selected)
+    streaming_write(rawbuf, sizeof(rawbuf));
 
   if (laudio_status & LAUDIO_F_STARTED)
     laudio_write(rawbuf, last_rtptime);
@@ -4570,16 +4570,16 @@ player_playback_prev(void)
 }
 
 void
-player_icecast_start(player_icecast_cb cb)
+player_streaming_start(player_streaming_cb cb)
 {
-  icecast_write = cb;
-  icecast_selected = 1;
+  streaming_write = cb;
+  streaming_selected = 1;
 }
 
 void
-player_icecast_stop(void)
+player_streaming_stop(void)
 {
-  icecast_selected = 0;
+  streaming_selected = 0;
 }
 
 
